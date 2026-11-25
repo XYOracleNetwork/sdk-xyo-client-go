@@ -1,0 +1,16 @@
+# Binaries and build outputs
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
