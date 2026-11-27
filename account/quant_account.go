@@ -59,6 +59,9 @@ func QuantAccountFromSeed(seed []byte, opts ...AccountOption) (*QuantAccount, er
 			opt(&cfg)
 		}
 	}
+	if cfg.initErr != nil {
+		return nil, cfg.initErr
+	}
 
 	var seedArr [mldsa65.SeedSize]byte
 	copy(seedArr[:], seed)
@@ -94,9 +97,11 @@ func QuantAccountFromSeed(seed []byte, opts ...AccountOption) (*QuantAccount, er
 		if stored, ok, err := acct.previousHashStore.GetItem(acct.addressStr); err != nil {
 			return nil, err
 		} else if ok {
-			if b, decErr := DecodeHex(stored); decErr == nil && len(b) == HashSize {
-				acct.previousHash = b
+			b, decErr := DecodeHex(stored)
+			if decErr != nil || len(b) != HashSize {
+				return nil, fmt.Errorf("invalid stored previous hash: %q", stored)
 			}
+			acct.previousHash = b
 		}
 	}
 
@@ -147,6 +152,11 @@ func (a *QuantAccount) PublicKeyUncompressed() []byte {
 	return a.PublicKey()
 }
 
+// KeccakBytes returns the 32-byte Keccak-256 hash of the ML-DSA-65 public key.
+func (a *QuantAccount) KeccakBytes() []byte {
+	return Keccak256(a.pubKeyBytes)
+}
+
 func (a *QuantAccount) PreviousHash() []byte {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -166,6 +176,64 @@ func (a *QuantAccount) PreviousHashHex() *string {
 	}
 	s := hex.EncodeToString(a.previousHash)
 	return &s
+}
+
+// LoadPreviousHash loads or explicitly sets the account's previous hash under its signing mutex.
+func (a *QuantAccount) LoadPreviousHash(explicit []byte) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(explicit) > 0 {
+		if len(explicit) != HashSize {
+			return fmt.Errorf("previous hash must be %d bytes, got %d", HashSize, len(explicit))
+		}
+		a.previousHash = append([]byte(nil), explicit...)
+		if a.previousHashStore != nil {
+			return a.previousHashStore.SetItem(a.addressStr, hex.EncodeToString(a.previousHash))
+		}
+		return nil
+	}
+	if a.previousHashStore != nil {
+		stored, ok, err := a.previousHashStore.GetItem(a.addressStr)
+		if err != nil {
+			return err
+		}
+		if ok {
+			b, err := DecodeHex(stored)
+			if err != nil || len(b) != HashSize {
+				return fmt.Errorf("invalid stored previous hash: %q", stored)
+			}
+			a.previousHash = b
+		}
+	}
+	return nil
+}
+
+// RollbackPreviousHash reverts the account's previous hash from expectedCurrent back to restorePrev
+// if the account's current previous hash still matches expectedCurrent.
+func (a *QuantAccount) RollbackPreviousHash(expectedCurrent, restorePrev []byte) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if hex.EncodeToString(a.previousHash) != hex.EncodeToString(expectedCurrent) {
+		return nil
+	}
+	if a.previousHashStore != nil {
+		if len(restorePrev) == 0 {
+			if err := a.previousHashStore.RemoveItem(a.addressStr); err != nil {
+				return err
+			}
+		} else {
+			curHex := hex.EncodeToString(expectedCurrent)
+			if _, err := a.previousHashStore.SetItemIfMatch(a.addressStr, &curHex, hex.EncodeToString(restorePrev)); err != nil {
+				return err
+			}
+		}
+	}
+	if len(restorePrev) == 0 {
+		a.previousHash = nil
+	} else {
+		a.previousHash = append([]byte(nil), restorePrev...)
+	}
+	return nil
 }
 
 // Sign signs the 32-byte hash with ML-DSA-65, returning the 5261-byte XYO wire bundle

@@ -221,4 +221,161 @@ func TestSchemaValidationSequenceAndHuri(t *testing.T) {
 	if errs := w.Validate(); len(errs) != 0 {
 		t.Fatalf("expected no validation errors, got %v", errs)
 	}
+
+	// Non-hex HURI and Sequence must be rejected
+	if _, err := payload.ParseHuri("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"); err == nil {
+		t.Error("expected non-hex bare HURI to fail")
+	}
+	if _, err := payload.ParseHuri("https://api.archivist.xyo.network/Archivist/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"); err == nil {
+		t.Error("expected non-hex URL HURI to fail")
+	}
+	if _, err := payload.LocalSequence(1, 0, "zzzzzzzz"); err == nil {
+		t.Error("expected non-hex hash in LocalSequence to fail")
+	}
+	if _, err := payload.QualifiedSequence(1, 0, hash, "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"); err == nil {
+		t.Error("expected non-hex address in QualifiedSequence to fail")
+	}
+	if !payload.IsValidLocalSequence(locSeq) || !payload.IsValidQualifiedSequence(qualSeq) {
+		t.Error("expected generated sequences to validate")
+	}
+	locSeq2, _ := payload.LocalSequence(1700000000001, 0, hash)
+	if payload.CompareSequence(locSeq, locSeq2) >= 0 {
+		t.Error("expected earlier sequence to compare less than later sequence")
+	}
+	if payload.SchemaNameLevels("network.xyo.boundwitness") != 3 {
+		t.Error("expected 3 schema levels")
+	}
+}
+
+func TestJsCompatTypedPluginPayloads(t *testing.T) {
+	// Mirrors Swift/Android JsVectorPluginPayloadTest: verify typed Go payload structs
+	// hash identically to the JS reference vectors in jsCompatVectors.json.
+	raw, err := os.ReadFile(filepath.Join("..", "testdata", "jsCompatVectors.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v jsPayloadVectors
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]struct{ hash, dataHash string }, len(v.PayloadHashes))
+	for _, tc := range v.PayloadHashes {
+		byID[tc.ID] = struct{ hash, dataHash string }{tc.Hash, tc.DataHash}
+	}
+
+	floatPtr := func(f float64) *float64 { return &f }
+	int64Ptr := func(i int64) *int64 { return &i }
+
+	cases := []struct {
+		id string
+		p  any
+	}{
+		{"plugin-address", payload.NewAddressPayload("1234567890abcdef1234567890abcdef12345678", "primary-signer")},
+		{"plugin-config", payload.NewConfigPayload(map[string]any{"timeout": 30, "retries": 3, "enabled": true, "label": "test-config"})},
+		{"plugin-domain", payload.NewDomainPayload("xyo.network", map[string]any{"primary": "xyo.network", "cdn": "cdn.xyo.network"})},
+		{"plugin-id", payload.NewIdPayload("cross-sdk-id-vector")},
+		{"plugin-schema", payload.NewSchemaPayload(map[string]any{"title": "test", "version": 1, "fields": []string{"a", "b", "c"}})},
+		{"plugin-value-number", payload.NewValuePayload(42)},
+		{"plugin-value-string", payload.NewValuePayload("hello-value-plugin")},
+		{"plugin-value-object", payload.NewValuePayload(map[string]any{"key": "nested", "n": 99})},
+		{"id-payload-salt-7", payload.NewIdPayload("7")},
+		{"location", payload.NewLocationPayload(payload.CurrentLocation{
+			Coords: payload.Coordinates{
+				Accuracy:         floatPtr(5),
+				Altitude:         floatPtr(15),
+				AltitudeAccuracy: floatPtr(15),
+				Heading:          floatPtr(90),
+				Latitude:         37.7749,
+				Longitude:        -122.4194,
+				Speed:            floatPtr(2.5),
+			},
+			Timestamp: int64Ptr(1609459200000),
+		})},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			want, ok := byID[tc.id]
+			if !ok {
+				t.Fatalf("missing vector %q in jsCompatVectors.json", tc.id)
+			}
+			gotH, err := payload.Hash(tc.p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotH != want.hash {
+				canon, _ := payload.CanonicalJSON(tc.p, payload.MetaExclusionStorageMeta)
+				t.Errorf("hash mismatch:\n canon=%s\n got  %s\n want %s", canon, gotH, want.hash)
+			}
+			gotDH, err := payload.DataHash(tc.p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotDH != want.dataHash {
+				t.Errorf("dataHash mismatch:\n got  %s\n want %s", gotDH, want.dataHash)
+			}
+		})
+	}
+}
+
+func TestCanonicalLargeFloatAndBatchHelpers(t *testing.T) {
+	// float64(1<<63) must NOT overflow int64 to negative; ECMAScript JSON.stringify(2**63) == "9223372036854776000".
+	canon, err := payload.CanonicalJSON(map[string]any{
+		"big":    float64(1 << 63),
+		"schema": "network.xyo.test",
+	}, payload.MetaExclusionAllMeta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"big":9223372036854776000,"schema":"network.xyo.test"}`
+	if string(canon) != want {
+		t.Fatalf("2^63 float canonical mismatch:\n got  %s\n want %s", string(canon), want)
+	}
+
+	// PayloadHasher batch utilities
+	p0 := payload.NewIdPayload("0")
+	p1 := payload.NewIdPayload("1")
+	p2 := payload.NewIdPayload("2")
+	list := []payload.IdPayload{p0, p1, p2}
+
+	pairs, err := payload.HashPairs(list)
+	if err != nil || len(pairs) != 3 {
+		t.Fatalf("HashPairs: %v", err)
+	}
+	hMap, err := payload.ToHashMap(list)
+	if err != nil || hMap[pairs[1].Hash].Salt != "1" {
+		t.Fatalf("ToHashMap failed: %v", err)
+	}
+	dhMap, err := payload.ToDataHashMap(list)
+	if err != nil || dhMap[pairs[2].Hash].Salt != "2" {
+		t.Fatalf("ToDataHashMap failed: %v", err)
+	}
+	excl, err := payload.FilterExcludeByHash(list, []string{pairs[1].Hash})
+	if err != nil || len(excl) != 2 {
+		t.Fatalf("FilterExcludeByHash: len=%d err=%v", len(excl), err)
+	}
+	incl, err := payload.FilterIncludeByDataHash(list, []string{pairs[0].Hash, pairs[2].Hash})
+	if err != nil || len(incl) != 2 {
+		t.Fatalf("FilterIncludeByDataHash: len=%d err=%v", len(incl), err)
+	}
+	found, ok, err := payload.FindByHash(list, pairs[2].Hash)
+	if err != nil || !ok || found.Salt != "2" {
+		t.Fatalf("FindByHash: found=%+v ok=%v err=%v", found, ok, err)
+	}
+	foundDH, ok, err := payload.FindByDataHash(list, pairs[0].Hash)
+	if err != nil || !ok || foundDH.Salt != "0" {
+		t.Fatalf("FindByDataHash: found=%+v ok=%v err=%v", foundDH, ok, err)
+	}
+
+	// PayloadWrapper.Validate propagates tampered _hash and _dataHash errors
+	tampered, _ := payload.NewBuilder("network.xyo.id").Field("salt", "0").BuildWithHashMeta()
+	tampered["_hash"] = "0000000000000000000000000000000000000000000000000000000000000000"
+	tampered["_dataHash"] = "0000000000000000000000000000000000000000000000000000000000000000"
+	tw, err := payload.Wrap(tampered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if errs := tw.Validate(); len(errs) != 2 {
+		t.Fatalf("expected 2 hash mismatch errors, got %d: %v", len(errs), errs)
+	}
 }

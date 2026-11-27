@@ -50,6 +50,16 @@ func (r *StakeRunner) WithdrawStake(ctx context.Context, slot int64) (json.RawMe
 	return r.transport.CallRaw(ctx, RPCMethodStakeRunnerWithdrawStake, slot)
 }
 
+// BlockRunner defines block submission/production runner operations (matching Android BlockRunner).
+type BlockRunner interface {
+	SubmitBlocks(ctx context.Context, blocks []HydratedBlock) ([]string, error)
+}
+
+// FinalizationRunner defines finalization operations (matching Android FinalizationRunner).
+type FinalizationRunner interface {
+	FinalizeBlock(ctx context.Context, block HydratedBlock) (*HydratedBlock, error)
+}
+
 // XyoViewer is the aggregate XL1 Chain Protocol client facade composing all viewers and runners
 // over a shared RPCTransport (matching Android & Swift XyoViewer).
 type XyoViewer struct {
@@ -71,6 +81,7 @@ type XyoViewer struct {
 	RewardsByStaker   *NetworkStakingStepRewardsViewer
 	RewardsByStep     *NetworkStakingStepRewardsViewer
 	RewardsTotal      *NetworkStakingStepRewardsViewer
+	LegacyStepRewards *LegacyNetworkStakeStepRewardsViewer
 	TransferBalance   *TransferBalanceViewer
 	BlockReward       *BlockRewardViewer
 	Fork              *ForkViewer
@@ -97,6 +108,7 @@ func NewXyoViewer(t RPCTransport) *XyoViewer {
 		RewardsByStaker:   NewRewardsByStakerViewer(t),
 		RewardsByStep:     NewRewardsByStepViewer(t),
 		RewardsTotal:      NewRewardsTotalViewer(t),
+		LegacyStepRewards: NewLegacyNetworkStakeStepRewardsViewer(t),
 		TransferBalance:   NewTransferBalanceViewer(t),
 		BlockReward:       NewBlockRewardViewer(t),
 		Fork:              NewForkViewer(t),
@@ -127,8 +139,20 @@ func (v *XyoViewer) FinalizedHead(ctx context.Context) (*HydratedBlock, error) {
 	return v.Finalization.Head(ctx)
 }
 
-func (v *XyoViewer) TransactionByHash(ctx context.Context, hash string) (*HydratedTransaction, error) {
+func (v *XyoViewer) ByHash(ctx context.Context, hash string) (*HydratedTransaction, error) {
 	return v.Transaction.ByHash(ctx, hash)
+}
+
+func (v *XyoViewer) TransactionByHash(ctx context.Context, hash string) (*HydratedTransaction, error) {
+	return v.Transaction.TransactionByHash(ctx, hash)
+}
+
+func (v *XyoViewer) AccountBalances(ctx context.Context, addresses []string, config *AccountBalanceConfig) (*ChainQualified[map[string]AttoXL1], error) {
+	return v.AccountBalance.QualifiedAccountBalances(ctx, addresses, config)
+}
+
+func (v *XyoViewer) PendingTransactions(ctx context.Context, options ...any) ([]HydratedTransaction, error) {
+	return v.Mempool.PendingTransactions(ctx, options...)
 }
 
 func (v *XyoViewer) SubmitTransactions(ctx context.Context, txs []HydratedTransaction) ([]string, error) {

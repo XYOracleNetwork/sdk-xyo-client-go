@@ -3,7 +3,10 @@ package boundwitness
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 
+	"github.com/XYOracleNetwork/sdk-xyo-client-go/account"
 	"github.com/XYOracleNetwork/sdk-xyo-client-go/payload"
 )
 
@@ -59,7 +62,9 @@ func ParseTuple(raw []byte) (*BoundWitnessWrapper, error) {
 	}
 	var modErrs []payload.ModuleErrorPayload
 	if len(tuple) >= 3 && len(tuple[2]) > 0 && string(tuple[2]) != "null" {
-		_ = json.Unmarshal(tuple[2], &modErrs)
+		if err := json.Unmarshal(tuple[2], &modErrs); err != nil {
+			return nil, fmt.Errorf("unmarshal tuple errors: %w", err)
+		}
 	}
 	return &BoundWitnessWrapper{
 		BoundWitness: &bw,
@@ -158,28 +163,128 @@ func (w *BoundWitnessWrapper) PayloadsBySchema(schema string) []payload.AnyPaylo
 	return out
 }
 
+// PayloadsByHashes returns accompanying payloads matching any of the given root hashes (in request order).
+func (w *BoundWitnessWrapper) PayloadsByHashes(hashes []string) ([]payload.AnyPayload, error) {
+	hm, err := w.PayloadsHashMap()
+	if err != nil {
+		return nil, err
+	}
+	var out []payload.AnyPayload
+	for _, h := range hashes {
+		if p, ok := hm[strings.ToLower(account.StripHexPrefix(h))]; ok {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// PayloadsByDataHashes returns accompanying payloads matching any of the given dataHashes (in request order).
+func (w *BoundWitnessWrapper) PayloadsByDataHashes(dataHashes []string) ([]payload.AnyPayload, error) {
+	dhm, err := w.PayloadsDataHashMap()
+	if err != nil {
+		return nil, err
+	}
+	var out []payload.AnyPayload
+	for _, h := range dataHashes {
+		if p, ok := dhm[strings.ToLower(account.StripHexPrefix(h))]; ok {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// WrappedPayloads wraps each accompanying payload in a payload.PayloadWrapper.
+func (w *BoundWitnessWrapper) WrappedPayloads() ([]*payload.PayloadWrapper, error) {
+	out := make([]*payload.PayloadWrapper, 0, len(w.Payloads))
+	for _, p := range w.Payloads {
+		pw, err := payload.Wrap(p)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, pw)
+	}
+	return out, nil
+}
+
 // Prev returns the previous_hash recorded for address in this BoundWitness, or nil if absent/genesis.
 func (w *BoundWitnessWrapper) Prev(address string) *string {
+	return w.PreviousHashForAddress(address)
+}
+
+// PreviousHashForAddress returns the previous_hash recorded for address (normalized), or nil if absent/genesis.
+func (w *BoundWitnessWrapper) PreviousHashForAddress(address string) *string {
+	target, err := account.NormalizeAddress(address)
+	if err != nil {
+		target = strings.ToLower(account.StripHexPrefix(address))
+	}
 	for i, a := range w.BoundWitness.Addresses {
-		if a == address && i < len(w.BoundWitness.PreviousHashes) {
+		norm, normErr := account.NormalizeAddress(a)
+		if normErr != nil {
+			norm = strings.ToLower(account.StripHexPrefix(a))
+		}
+		if norm == target && i < len(w.BoundWitness.PreviousHashes) {
 			return w.BoundWitness.PreviousHashes[i]
 		}
 	}
 	return nil
 }
 
-// Dig extracts nested BoundWitnesses up to the requested depth (depth 1 returns immediate nested BWs).
+// ToResult returns the canonical 3-element tuple [boundWitness, payloads, errors] as a slice for wire encoding.
+func (w *BoundWitnessWrapper) ToResult() []any {
+	return []any{w.BoundWitness, w.Payloads, w.Errors}
+}
+
+// Dig extracts nested BoundWitnesses recursively up to the requested depth
+// (depth <= 0 returns [w.BoundWitness]; depth 1 returns immediate nested BWs; depth > 1 traverses deeper).
 func (w *BoundWitnessWrapper) Dig(depth int) []*BoundWitness {
 	if depth <= 0 {
 		return []*BoundWitness{w.BoundWitness}
 	}
+	hm, err := w.PayloadsHashMap()
+	if err != nil {
+		return nil
+	}
+	dhm, err := w.PayloadsDataHashMap()
+	if err != nil {
+		return nil
+	}
+	visited := make(map[string]struct{})
+	if rootHash, err := w.Hash(); err == nil {
+		visited[rootHash] = struct{}{}
+	}
 	var out []*BoundWitness
-	for _, p := range w.PayloadsBySchema(SchemaBoundWitness) {
-		var nested BoundWitness
-		if err := p.DecodeInto(&nested); err == nil {
+	var walk func(cur *BoundWitness, remaining int)
+	walk = func(cur *BoundWitness, remaining int) {
+		if remaining <= 0 || cur == nil {
+			return
+		}
+		for i, schema := range cur.PayloadSchemas {
+			if schema != SchemaBoundWitness || i >= len(cur.PayloadHashes) {
+				continue
+			}
+			h := cur.PayloadHashes[i]
+			p, ok := hm[h]
+			if !ok {
+				p, ok = dhm[h]
+			}
+			if !ok {
+				continue
+			}
+			var nested BoundWitness
+			if err := p.DecodeInto(&nested); err != nil {
+				continue
+			}
+			if _, seen := visited[h]; seen {
+				continue
+			}
+			visited[h] = struct{}{}
 			out = append(out, &nested)
+			if remaining > 1 {
+				walk(&nested, remaining-1)
+			}
 		}
 	}
+	walk(w.BoundWitness, depth)
 	return out
 }
 

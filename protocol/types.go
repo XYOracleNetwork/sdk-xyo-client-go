@@ -1,11 +1,54 @@
 package protocol
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"strconv"
 	"strings"
 )
+
+// TimeDomain constants for TimeSyncViewer RPC queries.
+const (
+	TimeDomainXL1      = "xl1"
+	TimeDomainEpoch    = "epoch"
+	TimeDomainEthereum = "ethereum"
+)
+
+// TimeUnit represents a named duration unit for BlockRate calculations.
+type TimeUnit string
+
+const (
+	TimeUnitSecond TimeUnit = "second"
+	TimeUnitMinute TimeUnit = "minute"
+	TimeUnitHour   TimeUnit = "hour"
+	TimeUnitDay    TimeUnit = "day"
+	TimeUnitWeek   TimeUnit = "week"
+)
+
+// TimeDurations holds canonical millisecond durations for TimeUnit values.
+var TimeDurations = map[TimeUnit]int64{
+	TimeUnitSecond: 1_000,
+	TimeUnitMinute: 60_000,
+	TimeUnitHour:   3_600_000,
+	TimeUnitDay:    86_400_000,
+	TimeUnitWeek:   604_800_000,
+}
+
+// TimeConfig configures time-rate queries and conversions.
+type TimeConfig struct {
+	Unit       TimeUnit `json:"unit,omitempty"`
+	BlockCount int64    `json:"blockCount,omitempty"`
+}
+
+// StepSize returns the canonical XL1 step size for step tier index (0..len(StepSizesValues)-1).
+func StepSize(step int) (int64, error) {
+	if step < 0 || step >= len(StepSizesValues) {
+		return 0, fmt.Errorf("step index %d out of range [0, %d)", step, len(StepSizesValues))
+	}
+	return StepSizesValues[step], nil
+}
 
 // ChainID identifies an XL1 blockchain (40-character lowercase hex address).
 type ChainID string
@@ -122,10 +165,20 @@ type BlockRate struct {
 	SecondsPerBlock float64 `json:"secondsPerBlock"`
 }
 
+// CaveatType identifies the kind of restriction on a wallet/chain permission.
+type CaveatType string
+
+const (
+	CaveatTypeChain            CaveatType = "chain"
+	CaveatTypeExpiration       CaveatType = "expiration"
+	CaveatTypeFilteredResponse CaveatType = "filteredResponse"
+	CaveatTypeRateLimit        CaveatType = "rateLimit"
+)
+
 // Caveat restricts a Permission scope.
 type Caveat struct {
-	Type  string `json:"type"`
-	Value any    `json:"value,omitempty"`
+	Type  CaveatType `json:"type"`
+	Value any        `json:"value,omitempty"`
 }
 
 // Permission represents a wallet/chain permission grant.
@@ -135,10 +188,44 @@ type Permission struct {
 	Caveats          []Caveat `json:"caveats,omitempty"`
 }
 
+// InvokerPermission represents a granted permission with its creation timestamp and ID.
+type InvokerPermission struct {
+	Permission
+	ID   string `json:"id,omitempty"`
+	Date int64  `json:"date,omitempty"`
+}
+
+// RequestedPermission represents a permission requested from an XL1 wallet/provider.
+type RequestedPermission struct {
+	ParentCapability string   `json:"parentCapability"`
+	Caveats          []Caveat `json:"caveats,omitempty"`
+}
+
+// Transfer represents an XL1 transfer record (from -> map of recipient -> AttoXL1).
+type Transfer struct {
+	From      string             `json:"from"`
+	Transfers map[string]AttoXL1 `json:"transfers"`
+	Epoch     *int64             `json:"epoch,omitempty"`
+	Context   map[string]any     `json:"context,omitempty"`
+}
+
+// TransferWithHashMeta pairs a Transfer with its payload root hash and dataHash.
+type TransferWithHashMeta struct {
+	Transfer
+	Hash     string `json:"_hash,omitempty"`
+	DataHash string `json:"_dataHash,omitempty"`
+}
+
 // ParseFlexibleAtto parses a balance value encoded as decimal string, 0x-hex string,
-// bare hex string, or JSON number into an AttoXL1.
+// json.Number, *big.Int, AttoXL1, or Go integer/float into an AttoXL1 without losing >2^53 precision.
 func ParseFlexibleAtto(raw any) (AttoXL1, error) {
 	switch v := raw.(type) {
+	case AttoXL1:
+		return v.ToAtto(), nil
+	case *big.Int:
+		return NewAttoXL1(v)
+	case json.Number:
+		return AttoXL1FromString(v.String())
 	case string:
 		return AttoXL1FromString(v)
 	case float64:
@@ -150,4 +237,22 @@ func ParseFlexibleAtto(raw any) (AttoXL1, error) {
 	default:
 		return AttoXL1FromString(fmt.Sprintf("%v", raw))
 	}
+}
+
+func decodeJSONUseNumber(raw []byte, dst any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	return dec.Decode(dst)
+}
+
+func decodeRawAtto(raw json.RawMessage) (AttoXL1, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return NewAttoXL1Int64(0)
+	}
+	var val any
+	if err := decodeJSONUseNumber(trimmed, &val); err != nil {
+		return AttoXL1{}, err
+	}
+	return ParseFlexibleAtto(val)
 }

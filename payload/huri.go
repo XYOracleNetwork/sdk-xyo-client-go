@@ -29,8 +29,8 @@ func ParseHuri(raw string) (*Huri, error) {
 	// Bare 64-char hex hash
 	if !strings.Contains(trimmed, "://") && !strings.Contains(trimmed, "/") {
 		h := strings.ToLower(trimmed)
-		if len(h) != 64 {
-			return nil, fmt.Errorf("invalid bare HURI hash length: %d", len(h))
+		if len(h) != 64 || !isHexLower(h) {
+			return nil, fmt.Errorf("invalid bare HURI hash: %q", trimmed)
 		}
 		return &Huri{Hash: h}, nil
 	}
@@ -44,8 +44,8 @@ func ParseHuri(raw string) (*Huri, error) {
 		return nil, fmt.Errorf("HURI %q missing hash segment", raw)
 	}
 	hashPart := strings.ToLower(segments[len(segments)-1])
-	if len(hashPart) != 64 {
-		return nil, fmt.Errorf("HURI %q hash segment must be 64 hex chars, got %d", raw, len(hashPart))
+	if len(hashPart) != 64 || !isHexLower(hashPart) {
+		return nil, fmt.Errorf("HURI %q hash segment must be 64 hex chars, got %q", raw, hashPart)
 	}
 	var pathPart string
 	if len(segments) > 1 {

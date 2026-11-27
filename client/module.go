@@ -16,9 +16,10 @@ const (
 	QuerySchemaModuleDiscover            = "network.xyo.query.module.discover"
 	QuerySchemaModuleDescribe            = "network.xyo.query.module.describe"
 	QuerySchemaModuleManifest            = "network.xyo.query.module.manifest"
+	QuerySchemaModuleAddress             = "network.xyo.query.module.address"
 	QuerySchemaModuleState               = "network.xyo.query.module.state"
 	QuerySchemaModuleSubscribe           = "network.xyo.query.module.subscribe"
-	QuerySchemaModuleAddressPreviousHash = "network.xyo.query.module.address.previousHash"
+	QuerySchemaModuleAddressPreviousHash = "network.xyo.query.module.address.previous"
 
 	// Archivist queries
 	QuerySchemaArchivistGet      = "network.xyo.query.archivist.get"
@@ -48,6 +49,7 @@ const (
 	// Node queries
 	QuerySchemaNodeAttach     = "network.xyo.query.node.attach"
 	QuerySchemaNodeAttached   = "network.xyo.query.node.attached"
+	QuerySchemaNodeCertify    = "network.xyo.query.node.certify"
 	QuerySchemaNodeDetach     = "network.xyo.query.node.detach"
 	QuerySchemaNodeRegistered = "network.xyo.query.node.registered"
 )
@@ -57,6 +59,14 @@ type ModuleQueryResult struct {
 	BoundWitness *boundwitness.BoundWitness   `json:"bw"`
 	Payloads     []payload.AnyPayload         `json:"payloads"`
 	Errors       []payload.ModuleErrorPayload `json:"errors,omitempty"`
+}
+
+// BWDataHash returns the dataHash of the response BoundWitness (or "" if BoundWitness is nil).
+func (r *ModuleQueryResult) BWDataHash() (string, error) {
+	if r == nil || r.BoundWitness == nil {
+		return "", nil
+	}
+	return r.BoundWitness.DataHash()
 }
 
 // ModuleDescription describes an XYO module's identity and capabilities.
@@ -71,11 +81,16 @@ type ModuleDescription struct {
 type ModuleStatus string
 
 const (
+	ModuleStatusCreating ModuleStatus = "creating"
+	ModuleStatusCreated  ModuleStatus = "created"
 	ModuleStatusIdle     ModuleStatus = "idle"
 	ModuleStatusStarting ModuleStatus = "starting"
 	ModuleStatusStarted  ModuleStatus = "started"
 	ModuleStatusStopping ModuleStatus = "stopping"
 	ModuleStatusStopped  ModuleStatus = "stopped"
+	ModuleStatusError    ModuleStatus = "error"
+	ModuleStatusWrapped  ModuleStatus = "wrapped"
+	ModuleStatusProxy    ModuleStatus = "proxy"
 	ModuleStatusDead     ModuleStatus = "dead"
 )
 
@@ -122,6 +137,129 @@ type WitnessInstance interface {
 // SentinelInstance defines the standard Sentinel module operation.
 type SentinelInstance interface {
 	Report(ctx context.Context, payloads ...any) ([]any, error)
+}
+
+// BridgeInstance defines the standard Bridge module operations (matching Android BridgeInstance).
+type BridgeInstance interface {
+	ModuleInstance
+	Connect(ctx context.Context) (bool, error)
+	Disconnect(ctx context.Context) (bool, error)
+	Expose(ctx context.Context, id string) ([]string, error)
+	Unexpose(ctx context.Context, id string) ([]string, error)
+}
+
+// NodeInstance defines the standard Node module operations (matching Android NodeInstance).
+type NodeInstance interface {
+	ModuleInstance
+	Attach(ctx context.Context, nameOrAddress string, external bool) (string, error)
+	Attached(ctx context.Context) ([]string, error)
+	Detach(ctx context.Context, nameOrAddress string) (string, error)
+	Registered(ctx context.Context) ([]string, error)
+}
+
+// ModuleConfig represents base configuration fields shared by XYO modules.
+type ModuleConfig struct {
+	payload.BasePayload
+	Name     string            `json:"name,omitempty"`
+	Labels   map[string]string `json:"labels,omitempty"`
+	Security map[string]any    `json:"security,omitempty"`
+}
+
+// ModuleParams encapsulates module creation parameters.
+type ModuleParams struct {
+	Account account.Account
+	Config  *ModuleConfig
+}
+
+// ArchivistParents configures parent archivists for commit/read-through/write-through.
+type ArchivistParents struct {
+	Commit []string `json:"commit,omitempty"`
+	Read   []string `json:"read,omitempty"`
+	Write  []string `json:"write,omitempty"`
+}
+
+// ArchivistConfig represents an Archivist module configuration payload.
+type ArchivistConfig struct {
+	ModuleConfig
+	Parents           *ArchivistParents `json:"parents,omitempty"`
+	StoreParentReads  *bool             `json:"storeParentReads,omitempty"`
+	RequireAllParents *bool             `json:"requireAllParents,omitempty"`
+}
+
+// SentinelTask describes a witness/archivist reporting task on a Sentinel.
+type SentinelTask struct {
+	Module string `json:"module"`
+	Input  bool   `json:"input,omitempty"`
+}
+
+// SentinelConfig represents a Sentinel module configuration payload.
+type SentinelConfig struct {
+	ModuleConfig
+	Synchronous *bool          `json:"synchronous,omitempty"`
+	Tasks       []SentinelTask `json:"tasks,omitempty"`
+}
+
+// BridgeConfig represents a base Bridge module configuration payload.
+type BridgeConfig struct {
+	ModuleConfig
+	MaxDepth *int `json:"maxDepth,omitempty"`
+}
+
+// BridgeClientConfig represents a client Bridge configuration targeting a remote host.
+type BridgeClientConfig struct {
+	BridgeConfig
+	Host string `json:"host,omitempty"`
+}
+
+// BridgeHostConfig represents a host Bridge configuration exposing local modules.
+type BridgeHostConfig struct {
+	BridgeConfig
+	Expose []string `json:"expose,omitempty"`
+}
+
+// Module type-check helpers (matching Android ModuleTypeChecks & Swift ModuleInstance.isSupportedQuery).
+
+// IsSupportedQuery reports whether mod advertises querySchema in its Queries list.
+func IsSupportedQuery(mod ModuleInstance, querySchema string) bool {
+	if mod == nil {
+		return false
+	}
+	for _, q := range mod.Queries() {
+		if q == querySchema {
+			return true
+		}
+	}
+	return false
+}
+
+// IsArchivist reports whether mod advertises core Archivist query schemas.
+func IsArchivist(mod ModuleInstance) bool {
+	return IsSupportedQuery(mod, QuerySchemaArchivistGet) && IsSupportedQuery(mod, QuerySchemaArchivistInsert)
+}
+
+// IsDiviner reports whether mod advertises the Diviner divine query schema.
+func IsDiviner(mod ModuleInstance) bool {
+	return IsSupportedQuery(mod, QuerySchemaDivinerDivine)
+}
+
+// IsWitness reports whether mod advertises the Witness observe query schema.
+func IsWitness(mod ModuleInstance) bool {
+	return IsSupportedQuery(mod, QuerySchemaWitnessObserve)
+}
+
+// IsSentinel reports whether mod advertises the Sentinel report query schema.
+func IsSentinel(mod ModuleInstance) bool {
+	return IsSupportedQuery(mod, QuerySchemaSentinelReport)
+}
+
+// IsBridge reports whether mod advertises Bridge connect/disconnect query schemas.
+func IsBridge(mod ModuleInstance) bool {
+	return IsSupportedQuery(mod, QuerySchemaBridgeConnect) && IsSupportedQuery(mod, QuerySchemaBridgeDisconnect)
+}
+
+// IsNode reports whether mod advertises Node attach/attached query schemas.
+func IsNode(mod ModuleInstance) bool {
+	return IsSupportedQuery(mod, QuerySchemaNodeAttach) && IsSupportedQuery(mod, QuerySchemaNodeAttached)
 }
 
 // ModuleResolver resolves XYO modules by address, name, or supported query schema.

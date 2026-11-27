@@ -130,17 +130,8 @@ func (b *BoundWitnessBuilder) build(sign bool) (*BoundWitness, []any, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("compute bound witness dataHash: %w", err)
 		}
-		for i, part := range b.participants {
-			if part.Account == nil {
-				sigs[i] = nil
-				continue
-			}
-			sigBytes, err := part.Account.Sign(dataHashBytes)
-			if err != nil {
-				return nil, nil, fmt.Errorf("sign bound witness for %s: %w", part.Account.Address(), err)
-			}
-			sigHex := hex.EncodeToString(sigBytes)
-			sigs[i] = &sigHex
+		if err := signParticipantsAtomic(b.participants, dataHashBytes, sigs); err != nil {
+			return nil, nil, fmt.Errorf("sign bound witness: %w", err)
 		}
 		if len(sigs) > 0 {
 			bw.Signatures = sigs
@@ -148,6 +139,39 @@ func (b *BoundWitnessBuilder) build(sign bool) (*BoundWitness, []any, error) {
 	}
 
 	return bw, payloads, nil
+}
+
+type rollbackableAccount interface {
+	RollbackPreviousHash(expectedCurrent, restorePrev []byte) error
+}
+
+type signedSnapshot struct {
+	acct account.Account
+	prev []byte
+}
+
+func signParticipantsAtomic(participants []Participant, dataHashBytes []byte, sigs []*string) error {
+	var signed []signedSnapshot
+	for i, part := range participants {
+		if part.Account == nil {
+			sigs[i] = nil
+			continue
+		}
+		prevBefore := part.Account.PreviousHash()
+		sigBytes, err := part.Account.Sign(dataHashBytes)
+		if err != nil {
+			for j := len(signed) - 1; j >= 0; j-- {
+				if rb, ok := signed[j].acct.(rollbackableAccount); ok {
+					_ = rb.RollbackPreviousHash(dataHashBytes, signed[j].prev)
+				}
+			}
+			return fmt.Errorf("for %s: %w", part.Account.Address(), err)
+		}
+		signed = append(signed, signedSnapshot{acct: part.Account, prev: prevBefore})
+		sigHex := hex.EncodeToString(sigBytes)
+		sigs[i] = &sigHex
+	}
+	return nil
 }
 
 func (b *BoundWitnessBuilder) assembleFields() (*BoundWitness, []any, error) {
@@ -226,10 +250,16 @@ func CosignBoundWitness(bw *BoundWitness, signer account.Account) (*BoundWitness
 	if signer == nil {
 		return nil, errors.New("signer is nil")
 	}
-	addr := signer.Address()
+	if len(bw.PreviousHashes) != len(bw.Addresses) {
+		return nil, fmt.Errorf("previous_hashes length (%d) != addresses length (%d)", len(bw.PreviousHashes), len(bw.Addresses))
+	}
+	addr, err := account.NormalizeAddress(signer.Address())
+	if err != nil {
+		return nil, fmt.Errorf("invalid signer address: %w", err)
+	}
 	idx := -1
 	for i, a := range bw.Addresses {
-		if a == addr {
+		if norm, normErr := account.NormalizeAddress(a); normErr == nil && norm == addr {
 			idx = i
 			break
 		}
@@ -243,10 +273,7 @@ func CosignBoundWitness(bw *BoundWitness, signer account.Account) (*BoundWitness
 
 	// Verify previous_hash expectation matches signer's current chain state
 	signerPrev := signer.PreviousHashHex()
-	var bwPrev *string
-	if idx < len(bw.PreviousHashes) {
-		bwPrev = bw.PreviousHashes[idx]
-	}
+	bwPrev := bw.PreviousHashes[idx]
 	if !stringPtrEqual(bwPrev, signerPrev) {
 		return nil, fmt.Errorf("previous_hash mismatch for %s", addr)
 	}
@@ -332,6 +359,24 @@ func (qb *QueryBoundWitnessBuilder) SourceQuery(hash string) *QueryBoundWitnessB
 	return qb
 }
 
+// Timestamp sets an optional explicit epoch millisecond timestamp on the QueryBoundWitness.
+func (qb *QueryBoundWitnessBuilder) Timestamp(ts int64) *QueryBoundWitnessBuilder {
+	qb.BoundWitnessBuilder.Timestamp(ts)
+	return qb
+}
+
+// Version sets the optional $version client metadata field.
+func (qb *QueryBoundWitnessBuilder) Version(v int) *QueryBoundWitnessBuilder {
+	qb.BoundWitnessBuilder.Version(v)
+	return qb
+}
+
+// Participant adds an address-only participant slot for sequential cosigning.
+func (qb *QueryBoundWitnessBuilder) Participant(address string, previousHash *string) *QueryBoundWitnessBuilder {
+	qb.BoundWitnessBuilder.Participant(address, previousHash)
+	return qb
+}
+
 // Build constructs and signs the QueryBoundWitness and returns (qbw, payloadsIncludingQuery, err).
 func (qb *QueryBoundWitnessBuilder) Build() (*QueryBoundWitness, []any, error) {
 	if qb.queryPayload == nil {
@@ -366,17 +411,8 @@ func (qb *QueryBoundWitnessBuilder) Build() (*QueryBoundWitness, []any, error) {
 	}
 
 	sigs := make([]*string, len(inner.participants))
-	for i, part := range inner.participants {
-		if part.Account == nil {
-			sigs[i] = nil
-			continue
-		}
-		sigBytes, err := part.Account.Sign(dataHashBytes)
-		if err != nil {
-			return nil, nil, fmt.Errorf("sign QueryBoundWitness for %s: %w", part.Account.Address(), err)
-		}
-		sigHex := hex.EncodeToString(sigBytes)
-		sigs[i] = &sigHex
+	if err := signParticipantsAtomic(inner.participants, dataHashBytes, sigs); err != nil {
+		return nil, nil, fmt.Errorf("sign QueryBoundWitness: %w", err)
 	}
 	if len(sigs) > 0 {
 		qbw.Signatures = sigs

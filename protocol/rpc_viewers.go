@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,8 +18,12 @@ type BlockViewer struct {
 func NewBlockViewer(t RPCTransport) *BlockViewer { return &BlockViewer{transport: t} }
 
 func (v *BlockViewer) CurrentBlock(ctx context.Context) (*HydratedBlock, error) {
+	raw, err := v.transport.CallRaw(ctx, RPCMethodBlockViewerCurrentBlock)
+	if err != nil || isJSONNull(raw) {
+		return nil, err
+	}
 	var out HydratedBlock
-	if err := v.transport.Call(ctx, RPCMethodBlockViewerCurrentBlock, &out); err != nil {
+	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -142,7 +147,7 @@ func (v *AccountBalanceViewer) QualifiedAccountBalances(
 		return nil, errors.New("qualifiedAccountBalances response must be a 2-element tuple")
 	}
 	var rawBalances map[string]any
-	if err := json.Unmarshal(tuple[0], &rawBalances); err != nil {
+	if err := decodeJSONUseNumber(tuple[0], &rawBalances); err != nil {
 		return nil, fmt.Errorf("decode balances map: %w", err)
 	}
 	balances := make(map[string]AttoXL1, len(rawBalances))
@@ -167,7 +172,7 @@ func (v *AccountBalanceViewer) QualifiedAccountBalanceHistories(
 	ctx context.Context,
 	addresses []string,
 	config *AccountBalanceConfig,
-) (*ChainQualified[map[string][]any], error) {
+) (*ChainQualified[map[string][]AccountBalanceHistoryItem], error) {
 	params := []any{addresses}
 	if config != nil {
 		params = append(params, config)
@@ -183,15 +188,30 @@ func (v *AccountBalanceViewer) QualifiedAccountBalanceHistories(
 	if len(tuple) < 2 {
 		return nil, errors.New("qualifiedAccountBalanceHistories response must be a 2-element tuple")
 	}
-	var histories map[string][]any
-	if err := json.Unmarshal(tuple[0], &histories); err != nil {
+	var rawHistories map[string][]json.RawMessage
+	if err := json.Unmarshal(tuple[0], &rawHistories); err != nil {
 		return nil, err
+	}
+	histories := make(map[string][]AccountBalanceHistoryItem, len(rawHistories))
+	for addr, entries := range rawHistories {
+		items := make([]AccountBalanceHistoryItem, 0, len(entries))
+		for _, entry := range entries {
+			var item AccountBalanceHistoryItem
+			if uErr := json.Unmarshal(entry, &item); uErr == nil && (item.Block != 0 || item.Balance.BigInt().Sign() != 0) {
+				items = append(items, item)
+			} else {
+				var anyVal any
+				_ = decodeJSONUseNumber(entry, &anyVal)
+				items = append(items, AccountBalanceHistoryItem{Raw: anyVal})
+			}
+		}
+		histories[addr] = items
 	}
 	var qual ChainQualification
 	if err := json.Unmarshal(tuple[1], &qual); err != nil {
 		return nil, err
 	}
-	return &ChainQualified[map[string][]any]{
+	return &ChainQualified[map[string][]AccountBalanceHistoryItem]{
 		Data:          histories,
 		Qualification: qual,
 	}, nil
@@ -207,8 +227,12 @@ func NewFinalizationViewer(t RPCTransport) *FinalizationViewer {
 }
 
 func (v *FinalizationViewer) Head(ctx context.Context) (*HydratedBlock, error) {
+	raw, err := v.transport.CallRaw(ctx, RPCMethodFinalizationViewerHead)
+	if err != nil || isJSONNull(raw) {
+		return nil, err
+	}
 	var out HydratedBlock
-	if err := v.transport.Call(ctx, RPCMethodFinalizationViewerHead, &out); err != nil {
+	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -291,8 +315,12 @@ func (v *TimeSyncViewer) CurrentTimeAndHash(ctx context.Context, domain string) 
 }
 
 func (v *TimeSyncViewer) CurrentTimePayload(ctx context.Context) (*TimePayload, error) {
+	raw, err := v.transport.CallRaw(ctx, RPCMethodTimeSyncViewerCurrentTimePayload)
+	if err != nil || isJSONNull(raw) {
+		return nil, err
+	}
 	var out TimePayload
-	if err := v.transport.Call(ctx, RPCMethodTimeSyncViewerCurrentTimePayload, &out); err != nil {
+	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -306,16 +334,24 @@ type StakeViewer struct {
 func NewStakeViewer(t RPCTransport) *StakeViewer { return &StakeViewer{transport: t} }
 
 func (v *StakeViewer) StakeByID(ctx context.Context, id int64) (*Stake, error) {
+	raw, err := v.transport.CallRaw(ctx, RPCMethodStakeViewerStakeByID, id)
+	if err != nil || isJSONNull(raw) {
+		return nil, err
+	}
 	var out Stake
-	if err := v.transport.Call(ctx, RPCMethodStakeViewerStakeByID, &out, id); err != nil {
+	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
 func (v *StakeViewer) StakeByStaker(ctx context.Context, staker string, slot int64) (*Stake, error) {
+	raw, err := v.transport.CallRaw(ctx, RPCMethodStakeViewerStakeByStaker, staker, slot)
+	if err != nil || isJSONNull(raw) {
+		return nil, err
+	}
 	var out Stake
-	if err := v.transport.Call(ctx, RPCMethodStakeViewerStakeByStaker, &out, staker, slot); err != nil {
+	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -369,11 +405,11 @@ type StakeTotalsViewer struct {
 func NewStakeTotalsViewer(t RPCTransport) *StakeTotalsViewer { return &StakeTotalsViewer{transport: t} }
 
 func (v *StakeTotalsViewer) callAtto(ctx context.Context, method string, params ...any) (AttoXL1, error) {
-	var raw any
-	if err := v.transport.Call(ctx, method, &raw, params...); err != nil {
+	raw, err := v.transport.CallRaw(ctx, method, params...)
+	if err != nil {
 		return AttoXL1{}, err
 	}
-	return ParseFlexibleAtto(raw)
+	return decodeRawAtto(raw)
 }
 
 func (v *StakeTotalsViewer) Active(ctx context.Context, time ...int64) (AttoXL1, error) {
@@ -476,11 +512,11 @@ func (v *StepViewer) Randomizer(ctx context.Context, step any) (string, error) {
 }
 
 func (v *StepViewer) Stake(ctx context.Context, step any) (AttoXL1, error) {
-	var raw any
-	if err := v.transport.Call(ctx, RPCMethodStepViewerStake, &raw, step); err != nil {
+	raw, err := v.transport.CallRaw(ctx, RPCMethodStepViewerStake, step)
+	if err != nil {
 		return AttoXL1{}, err
 	}
-	return ParseFlexibleAtto(raw)
+	return decodeRawAtto(raw)
 }
 
 func (v *StepViewer) StakerCount(ctx context.Context, step any) (int64, error) {
@@ -497,11 +533,11 @@ func (v *StepViewer) Stakers(ctx context.Context, step any, opts ...any) ([]stri
 }
 
 func (v *StepViewer) Weight(ctx context.Context, step any) (AttoXL1, error) {
-	var raw any
-	if err := v.transport.Call(ctx, RPCMethodStepViewerWeight, &raw, step); err != nil {
+	raw, err := v.transport.CallRaw(ctx, RPCMethodStepViewerWeight, step)
+	if err != nil {
 		return AttoXL1{}, err
 	}
-	return ParseFlexibleAtto(raw)
+	return decodeRawAtto(raw)
 }
 
 // DataLakeViewer queries payloads from the XL1 DataLake.
@@ -547,8 +583,12 @@ func NewRewardsTotalViewer(t RPCTransport) *NetworkStakingStepRewardsViewer {
 }
 
 func (v *NetworkStakingStepRewardsViewer) callRewardsMap(ctx context.Context, suffix string, opts ...any) (map[string]AttoXL1, error) {
+	rawBytes, err := v.transport.CallRaw(ctx, v.prefix+suffix, opts...)
+	if err != nil || isJSONNull(rawBytes) {
+		return nil, err
+	}
 	var raw map[string]any
-	if err := v.transport.Call(ctx, v.prefix+suffix, &raw, opts...); err != nil {
+	if err := decodeJSONUseNumber(rawBytes, &raw); err != nil {
 		return nil, err
 	}
 	out := make(map[string]AttoXL1, len(raw))
@@ -582,6 +622,31 @@ func (v *NetworkStakingStepRewardsViewer) Unclaimed(ctx context.Context, opts ..
 	return v.callRewardsMap(ctx, "unclaimed", opts...)
 }
 
+// LegacyNetworkStakeStepRewardsViewer queries legacy networkStakeStepRewardsViewer_* RPC methods.
+type LegacyNetworkStakeStepRewardsViewer struct {
+	transport RPCTransport
+}
+
+func NewLegacyNetworkStakeStepRewardsViewer(t RPCTransport) *LegacyNetworkStakeStepRewardsViewer {
+	return &LegacyNetworkStakeStepRewardsViewer{transport: t}
+}
+
+func (v *LegacyNetworkStakeStepRewardsViewer) ByPosition(ctx context.Context, opts ...any) (json.RawMessage, error) {
+	return v.transport.CallRaw(ctx, RPCMethodLegacyNetworkStakeRewardsByPosition, opts...)
+}
+
+func (v *LegacyNetworkStakeStepRewardsViewer) ByStaker(ctx context.Context, opts ...any) (json.RawMessage, error) {
+	return v.transport.CallRaw(ctx, RPCMethodLegacyNetworkStakeRewardsByStaker, opts...)
+}
+
+func (v *LegacyNetworkStakeStepRewardsViewer) ByStep(ctx context.Context, opts ...any) (json.RawMessage, error) {
+	return v.transport.CallRaw(ctx, RPCMethodLegacyNetworkStakeRewardsByStep, opts...)
+}
+
+func (v *LegacyNetworkStakeStepRewardsViewer) Total(ctx context.Context, opts ...any) (json.RawMessage, error) {
+	return v.transport.CallRaw(ctx, RPCMethodLegacyNetworkStakeRewardsTotal, opts...)
+}
+
 // TransferBalanceViewer queries transfer balances and histories.
 type TransferBalanceViewer struct {
 	transport RPCTransport
@@ -592,16 +657,20 @@ func NewTransferBalanceViewer(t RPCTransport) *TransferBalanceViewer {
 }
 
 func (v *TransferBalanceViewer) TransferBalance(ctx context.Context, address string) (AttoXL1, error) {
-	var raw any
-	if err := v.transport.Call(ctx, RPCMethodTransferBalanceViewerBalance, &raw, address); err != nil {
+	raw, err := v.transport.CallRaw(ctx, RPCMethodTransferBalanceViewerBalance, address)
+	if err != nil {
 		return AttoXL1{}, err
 	}
-	return ParseFlexibleAtto(raw)
+	return decodeRawAtto(raw)
 }
 
 func (v *TransferBalanceViewer) TransferBalances(ctx context.Context, addresses []string) (map[string]AttoXL1, error) {
+	rawBytes, err := v.transport.CallRaw(ctx, RPCMethodTransferBalanceViewerBalances, addresses)
+	if err != nil || isJSONNull(rawBytes) {
+		return nil, err
+	}
 	var raw map[string]any
-	if err := v.transport.Call(ctx, RPCMethodTransferBalanceViewerBalances, &raw, addresses); err != nil {
+	if err := decodeJSONUseNumber(rawBytes, &raw); err != nil {
 		return nil, err
 	}
 	out := make(map[string]AttoXL1, len(raw))
@@ -620,11 +689,11 @@ func (v *TransferBalanceViewer) TransferBalanceHistory(ctx context.Context, addr
 }
 
 func (v *TransferBalanceViewer) TransferPairBalance(ctx context.Context, from, to string) (AttoXL1, error) {
-	var raw any
-	if err := v.transport.Call(ctx, RPCMethodTransferBalanceViewerPairBalance, &raw, from, to); err != nil {
+	raw, err := v.transport.CallRaw(ctx, RPCMethodTransferBalanceViewerPairBalance, from, to)
+	if err != nil {
 		return AttoXL1{}, err
 	}
-	return ParseFlexibleAtto(raw)
+	return decodeRawAtto(raw)
 }
 
 func (v *TransferBalanceViewer) TransferPairBalanceHistory(ctx context.Context, from, to string) (json.RawMessage, error) {
@@ -645,11 +714,11 @@ func NewBlockRewardViewer(t RPCTransport) *BlockRewardViewer {
 }
 
 func (v *BlockRewardViewer) AllowedRewardForBlock(ctx context.Context, blockNumber XL1BlockNumber) (AttoXL1, error) {
-	var raw any
-	if err := v.transport.Call(ctx, RPCMethodBlockRewardViewerAllowedRewardForBlock, &raw, int64(blockNumber)); err != nil {
+	raw, err := v.transport.CallRaw(ctx, RPCMethodBlockRewardViewerAllowedRewardForBlock, int64(blockNumber))
+	if err != nil {
 		return AttoXL1{}, err
 	}
-	return ParseFlexibleAtto(raw)
+	return decodeRawAtto(raw)
 }
 
 // ForkViewer queries fork history.
@@ -661,4 +730,9 @@ func NewForkViewer(t RPCTransport) *ForkViewer { return &ForkViewer{transport: t
 
 func (v *ForkViewer) ForkHistory(ctx context.Context) (json.RawMessage, error) {
 	return v.transport.CallRaw(ctx, RPCMethodForkViewerForkHistory)
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
 }

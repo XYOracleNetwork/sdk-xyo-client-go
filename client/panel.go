@@ -27,10 +27,22 @@ func NewPanel(acct account.Account, archivists []ArchivistInstance, witnesses ..
 			return nil, fmt.Errorf("create random panel account: %w", err)
 		}
 	}
+	var cleanArchs []ArchivistInstance
+	for _, a := range archivists {
+		if a != nil {
+			cleanArchs = append(cleanArchs, a)
+		}
+	}
+	var cleanWits []WitnessInstance
+	for _, w := range witnesses {
+		if w != nil {
+			cleanWits = append(cleanWits, w)
+		}
+	}
 	return &XyoPanel{
 		account:    acct,
-		archivists: append([]ArchivistInstance(nil), archivists...),
-		witnesses:  append([]WitnessInstance(nil), witnesses...),
+		archivists: cleanArchs,
+		witnesses:  cleanWits,
 	}, nil
 }
 

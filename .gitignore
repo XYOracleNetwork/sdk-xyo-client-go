@@ -14,3 +14,6 @@ coverage.html
 .idea/
 .vscode/
 *.swp
+
+# JS vector generator dependencies
+xl1-compat/node_modules/

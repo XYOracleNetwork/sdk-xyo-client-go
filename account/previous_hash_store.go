@@ -119,7 +119,11 @@ func (s *FilePreviousHashStore) persistLocked() error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	if err := os.Rename(tmp, s.path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func (s *FilePreviousHashStore) GetItem(address string) (string, bool, error) {
@@ -132,8 +136,18 @@ func (s *FilePreviousHashStore) GetItem(address string) (string, bool, error) {
 func (s *FilePreviousHashStore) SetItem(address string, hash string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.items[normalizeStoreKey(address)] = strings.ToLower(StripHexPrefix(hash))
-	return s.persistLocked()
+	key := normalizeStoreKey(address)
+	oldVal, existed := s.items[key]
+	s.items[key] = strings.ToLower(StripHexPrefix(hash))
+	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.items[key] = oldVal
+		} else {
+			delete(s.items, key)
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *FilePreviousHashStore) SetItemIfMatch(address string, expected *string, next string) (bool, error) {
@@ -153,6 +167,11 @@ func (s *FilePreviousHashStore) SetItemIfMatch(address string, expected *string,
 	}
 	s.items[key] = strings.ToLower(StripHexPrefix(next))
 	if err := s.persistLocked(); err != nil {
+		if exists {
+			s.items[key] = cur
+		} else {
+			delete(s.items, key)
+		}
 		return false, err
 	}
 	return true, nil
@@ -161,6 +180,14 @@ func (s *FilePreviousHashStore) SetItemIfMatch(address string, expected *string,
 func (s *FilePreviousHashStore) RemoveItem(address string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.items, normalizeStoreKey(address))
-	return s.persistLocked()
+	key := normalizeStoreKey(address)
+	oldVal, existed := s.items[key]
+	delete(s.items, key)
+	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.items[key] = oldVal
+		}
+		return err
+	}
+	return nil
 }

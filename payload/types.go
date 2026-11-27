@@ -146,6 +146,55 @@ type NetworkPayload struct {
 	Nodes []NetworkNodePayload `json:"nodes,omitempty"`
 }
 
+// Coordinates holds WGS-84 geographic coordinates for LocationPayload.
+type Coordinates struct {
+	Accuracy         *float64 `json:"accuracy,omitempty"`
+	Altitude         *float64 `json:"altitude,omitempty"`
+	AltitudeAccuracy *float64 `json:"altitudeAccuracy,omitempty"`
+	Heading          *float64 `json:"heading,omitempty"`
+	Latitude         float64  `json:"latitude"`
+	Longitude        float64  `json:"longitude"`
+	Speed            *float64 `json:"speed,omitempty"`
+}
+
+// CurrentLocation wraps coordinates and optional observation timestamp.
+type CurrentLocation struct {
+	Coords    Coordinates `json:"coords"`
+	Timestamp *int64      `json:"timestamp,omitempty"`
+}
+
+// LocationPayload represents a "network.xyo.location.current" payload (matching Swift/Android LocationPayload).
+type LocationPayload struct {
+	BasePayload
+	CurrentLocation CurrentLocation `json:"currentLocation"`
+}
+
+// NewLocationPayload creates a LocationPayload with the canonical "network.xyo.location.current" schema.
+func NewLocationPayload(loc CurrentLocation) LocationPayload {
+	return LocationPayload{
+		BasePayload:     BasePayload{Schema: SchemaLocationCurrent},
+		CurrentLocation: loc,
+	}
+}
+
+// SystemInfoPayload represents a "network.xyo.system.info" payload (matching Swift/Android SystemInfoPayload).
+type SystemInfoPayload struct {
+	BasePayload
+	Device  map[string]any `json:"device,omitempty"`
+	Network map[string]any `json:"network,omitempty"`
+	OS      map[string]any `json:"os,omitempty"`
+}
+
+// NewSystemInfoPayload creates a SystemInfoPayload with the canonical "network.xyo.system.info" schema.
+func NewSystemInfoPayload(device, network, osInfo map[string]any) SystemInfoPayload {
+	return SystemInfoPayload{
+		BasePayload: BasePayload{Schema: SchemaSystemInfo},
+		Device:      device,
+		Network:     network,
+		OS:          osInfo,
+	}
+}
+
 // NetworkMain is the canonical Mainnet archivist network preset.
 var NetworkMain = NetworkPayload{
 	BasePayload: BasePayload{Schema: SchemaNetwork},

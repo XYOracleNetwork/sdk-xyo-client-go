@@ -51,6 +51,22 @@ func EncodeQuantAddress(hrp string, addressBytes []byte) (string, error) {
 	return EncodeBech32m(hrp, addressBytes)
 }
 
+// DecodedQuantAddress holds the decoded HRP and 20-byte payload of a Bech32m quant address.
+type DecodedQuantAddress struct {
+	HRP   string
+	Bytes []byte
+}
+
+// TryDecodeQuantAddress attempts to decode a strictly lowercase Bech32m quant address,
+// returning nil if decoding fails.
+func TryDecodeQuantAddress(address string) *DecodedQuantAddress {
+	hrp, payload, err := DecodeQuantAddress(address)
+	if err != nil {
+		return nil
+	}
+	return &DecodedQuantAddress{HRP: hrp, Bytes: payload}
+}
+
 // DecodeQuantAddress decodes a strictly lowercase Bech32m quant address into (hrp, 20-byte payload).
 func DecodeQuantAddress(address string) (string, []byte, error) {
 	if address != strings.ToLower(address) {

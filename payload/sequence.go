@@ -16,8 +16,8 @@ const (
 // [epochMs: 16 hex chars][index: 8 hex chars][last 4 bytes of hashHex: 8 hex chars].
 func LocalSequence(epochMs uint64, index uint32, hashHex string) (string, error) {
 	clean := strings.ToLower(strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(hashHex), "0x"), "0X"))
-	if len(clean) < 8 {
-		return "", fmt.Errorf("hash must be at least 8 hex chars for sequence, got %d", len(clean))
+	if len(clean) < 8 || !isHexLower(clean) {
+		return "", fmt.Errorf("hash must be at least 8 valid hex chars for sequence, got %q", hashHex)
 	}
 	nonce := clean[len(clean)-8:]
 	return fmt.Sprintf("%016x%08x%s", epochMs, index, nonce), nil
@@ -31,8 +31,36 @@ func QualifiedSequence(epochMs uint64, index uint32, hashHex, addressHex string)
 		return "", err
 	}
 	addr := strings.ToLower(strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(addressHex), "0x"), "0X"))
-	if len(addr) != 40 {
-		return "", fmt.Errorf("address must be 40 hex chars for qualified sequence, got %d", len(addr))
+	if len(addr) != 40 || !isHexLower(addr) {
+		return "", fmt.Errorf("address must be 40 valid hex chars for qualified sequence, got %q", addressHex)
 	}
 	return local + addr, nil
+}
+
+// CompareSequence performs lexicographical comparison of two sequence strings, returning -1, 0, or +1.
+func CompareSequence(a, b string) int {
+	return strings.Compare(strings.ToLower(a), strings.ToLower(b))
+}
+
+// IsValidLocalSequence reports whether s is a valid 32-char lowercase hex LocalSequence.
+func IsValidLocalSequence(s string) bool {
+	return len(s) == LocalSequenceHexLength && isHexLower(s)
+}
+
+// IsValidQualifiedSequence reports whether s is a valid 72-char lowercase hex QualifiedSequence.
+func IsValidQualifiedSequence(s string) bool {
+	return len(s) == QualifiedSequenceHexLength && isHexLower(s)
+}
+
+func isHexLower(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }

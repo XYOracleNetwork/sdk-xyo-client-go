@@ -37,9 +37,10 @@ func (e *JSONRPCError) Error() string {
 }
 
 // JSONRPCResponse represents a JSON-RPC 2.0 response envelope.
+// ID intentionally omits "omitempty" so "id": 0 and "id": null are serialized per JSON-RPC 2.0.
 type JSONRPCResponse struct {
-	JSONRPC string          `json:"jsonrpc,omitempty"`
-	ID      any             `json:"id,omitempty"`
+	JSONRPC string          `json:"jsonrpc"`
+	ID      any             `json:"id"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *JSONRPCError   `json:"error,omitempty"`
 }
@@ -130,9 +131,39 @@ const (
 	// ForkViewer
 	RPCMethodForkViewerForkHistory = "forkViewer_forkHistory"
 
+	// Legacy NetworkStake StepRewardsViewer
+	RPCMethodLegacyNetworkStakeRewardsByPosition = "networkStakeStepRewardsViewer_byPosition"
+	RPCMethodLegacyNetworkStakeRewardsByStaker   = "networkStakeStepRewardsViewer_byStaker"
+	RPCMethodLegacyNetworkStakeRewardsByStep     = "networkStakeStepRewardsViewer_byStep"
+	RPCMethodLegacyNetworkStakeRewardsTotal      = "networkStakeStepRewardsViewer_total"
+
 	// NetworkStakingStepRewards (v1.26 split-per-dimension)
 	RPCMethodRewardsByPositionPrefix = "networkStakingStepRewardsByPositionViewer_"
 	RPCMethodRewardsByStakerPrefix   = "networkStakingStepRewardsByStakerViewer_"
 	RPCMethodRewardsByStepPrefix     = "networkStakingStepRewardsByStepViewer_"
 	RPCMethodRewardsTotalPrefix      = "networkStakingStepRewardsTotalViewer_"
+
+	RPCMethodRewardsByPositionBonus     = "networkStakingStepRewardsByPositionViewer_bonus"
+	RPCMethodRewardsByPositionClaimed   = "networkStakingStepRewardsByPositionViewer_claimed"
+	RPCMethodRewardsByPositionEarned    = "networkStakingStepRewardsByPositionViewer_earned"
+	RPCMethodRewardsByPositionTotal     = "networkStakingStepRewardsByPositionViewer_total"
+	RPCMethodRewardsByPositionUnclaimed = "networkStakingStepRewardsByPositionViewer_unclaimed"
+
+	RPCMethodRewardsByStakerBonus     = "networkStakingStepRewardsByStakerViewer_bonus"
+	RPCMethodRewardsByStakerClaimed   = "networkStakingStepRewardsByStakerViewer_claimed"
+	RPCMethodRewardsByStakerEarned    = "networkStakingStepRewardsByStakerViewer_earned"
+	RPCMethodRewardsByStakerTotal     = "networkStakingStepRewardsByStakerViewer_total"
+	RPCMethodRewardsByStakerUnclaimed = "networkStakingStepRewardsByStakerViewer_unclaimed"
+
+	RPCMethodRewardsByStepBonus     = "networkStakingStepRewardsByStepViewer_bonus"
+	RPCMethodRewardsByStepClaimed   = "networkStakingStepRewardsByStepViewer_claimed"
+	RPCMethodRewardsByStepEarned    = "networkStakingStepRewardsByStepViewer_earned"
+	RPCMethodRewardsByStepTotal     = "networkStakingStepRewardsByStepViewer_total"
+	RPCMethodRewardsByStepUnclaimed = "networkStakingStepRewardsByStepViewer_unclaimed"
+
+	RPCMethodRewardsTotalBonus     = "networkStakingStepRewardsTotalViewer_bonus"
+	RPCMethodRewardsTotalClaimed   = "networkStakingStepRewardsTotalViewer_claimed"
+	RPCMethodRewardsTotalEarned    = "networkStakingStepRewardsTotalViewer_earned"
+	RPCMethodRewardsTotalTotal     = "networkStakingStepRewardsTotalViewer_total"
+	RPCMethodRewardsTotalUnclaimed = "networkStakingStepRewardsTotalViewer_unclaimed"
 )

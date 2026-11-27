@@ -262,6 +262,10 @@ func TestQueryBoundWitnessBuilder(t *testing.T) {
 	qbw, payloads, err := boundwitness.NewQueryBuilder().
 		Query(q).
 		Signer(acct).
+		Timestamp(1700000000000).
+		Version(2).
+		Destination("5e7a847447e7fec41011ae7d32d768f86605ba03").
+		SourceQuery("ada56ff753c0c9b2ce5e1f823eda9ac53501db2843d8883d6cf6869c18ef7f65").
 		Build()
 	if err != nil {
 		t.Fatal(err)
@@ -271,5 +275,160 @@ func TestQueryBoundWitnessBuilder(t *testing.T) {
 	}
 	if errs := boundwitness.ValidateQueryBoundWitness(qbw); len(errs) != 0 {
 		t.Fatalf("ValidateQueryBoundWitness failed: %v", errs)
+	}
+
+	// Verify $sourceQuery and $destination do NOT alter DataHash (Swift QueryBoundWitnessTests parity)
+	qbwClone := qbw.Clone()
+	qbwClone.SourceQuery = ""
+	qbwClone.Destination = ""
+	dh1, _ := qbw.DataHash()
+	dh2, _ := qbwClone.DataHash()
+	if dh1 != dh2 {
+		t.Fatalf("client meta altered QueryBoundWitness dataHash: %s vs %s", dh1, dh2)
+	}
+	// Root hash DOES change because $sourceQuery/$destination are included in Hash()
+	rh1, _ := qbw.Hash()
+	rh2, _ := qbwClone.Hash()
+	if rh1 == rh2 {
+		t.Fatal("expected different root hashes when $sourceQuery/$destination differ")
+	}
+}
+
+func TestExtraFieldsPreservationAndValidatorEdgeCases(t *testing.T) {
+	// Unknown JSON fields (like $epoch1, $meta, custom_field) must survive JSON round-trip & hashing
+	rawWire := `{
+		"$epoch1": "1234567890",
+		"$meta": {
+			"client": "ios",
+			"signatures": ["fad86c98252b937a65be61f2307ce6d427a08425b4aee1c90fea0b446e9c862f46b6a36fea69450f83dadf9a2409c4f9ddc2e39a3dc222ae06f81b19eb2a17e6"]
+		},
+		"addresses": ["e3b3bb3cdc49e13f9ac5f48d52915368de43afec"],
+		"payload_hashes": ["c915c56dd93b5e0db509d1a63ca540cfb211e11f03039b05e19712267bb8b6db"],
+		"payload_schemas": ["network.xyo.test"],
+		"previous_hashes": [null],
+		"schema": "network.xyo.boundwitness"
+	}`
+	var bw boundwitness.BoundWitness
+	if err := json.Unmarshal([]byte(rawWire), &bw); err != nil {
+		t.Fatal(err)
+	}
+	dh, err := bw.DataHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dh != "6f731b3956114fd0d18820dbbe1116f9e36dc8d803b0bb049302f7109037468f" {
+		t.Fatalf("dataHash mismatch after unmarshal: %s", dh)
+	}
+	rh, err := bw.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rh != "6dc6e662a75fad55451d5a488f5687f90a93174c17359404945b392a37f70e07" {
+		t.Fatalf("rootHash mismatch (Extra $ fields dropped?): got %s", rh)
+	}
+
+	// Case-variant duplicate addresses must be caught by validator
+	badHash := "not-hex-hash"
+	dupBW := &boundwitness.BoundWitness{
+		Schema:         boundwitness.SchemaBoundWitness,
+		Addresses:      []string{"5e7a847447e7fec41011ae7d32d768f86605ba03", "0x5E7A847447E7FEC41011AE7D32D768F86605BA03"},
+		PreviousHashes: []*string{nil, &badHash},
+		PayloadHashes:  []string{"zzzz"},
+		PayloadSchemas: []string{"BadSchema"},
+	}
+	errs := boundwitness.ValidateBoundWitness(dupBW)
+	if len(errs) < 4 {
+		t.Fatalf("expected >=4 validation errors (dup addr, bad prev hash, bad payload hash, bad schema, sig len), got %d: %v", len(errs), errs)
+	}
+}
+
+func TestMultiSignerAtomicRollbackOnFailure(t *testing.T) {
+	store := account.NewMemoryPreviousHashStore()
+	a1, err := account.RandomAccount(account.WithPreviousHashStore(store))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a2, err := account.RandomAccount(account.WithPreviousHashStore(store))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate an external concurrent writer advancing a2 in the store so a2.Sign() fails CAS!
+	staleHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if err := store.SetItem(a2.Address(), staleHash); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = boundwitness.NewBuilder().
+		Signers(a1, a2).
+		Payload(payload.NewIdPayload("rollback-test")).
+		Build()
+	if err == nil {
+		t.Fatal("expected build failure when signer 2 hits CAS conflict")
+	}
+	// a1 MUST have been rolled back cleanly (both in-memory and in PreviousHashStore)
+	if a1.PreviousHash() != nil {
+		t.Fatalf("expected a1 previousHash rolled back to nil, got %x", a1.PreviousHash())
+	}
+	if _, ok, _ := store.GetItem(a1.Address()); ok {
+		t.Fatal("expected a1 entry removed from store after rollback")
+	}
+}
+
+func TestWrapperRecursiveDigAndHelpers(t *testing.T) {
+	acct, err := account.RandomAccount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Build 3-level nested BoundWitness chain: outer -> mid -> inner
+	inner, innerPayloads, err := boundwitness.NewBuilder().Signer(acct).Payload(payload.NewIdPayload("leaf")).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mid, _, err := boundwitness.NewBuilder().Signer(acct).Payload(inner).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer, _, err := boundwitness.NewBuilder().Signer(acct).Payload(mid).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w, err := boundwitness.Wrap(outer, []any{mid, inner, innerPayloads[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d1 := w.Dig(1)
+	if len(d1) != 1 {
+		t.Fatalf("Dig(1): expected 1 nested BW, got %d", len(d1))
+	}
+	d2 := w.Dig(2)
+	if len(d2) != 2 {
+		t.Fatalf("Dig(2): expected 2 nested BWs (mid + inner), got %d", len(d2))
+	}
+
+	// PayloadsByHashes, PayloadsByDataHashes, WrappedPayloads, ToResult
+	midHash, _ := mid.Hash()
+	byH, err := w.PayloadsByHashes([]string{midHash})
+	if err != nil || len(byH) != 1 {
+		t.Fatalf("PayloadsByHashes failed: len=%d err=%v", len(byH), err)
+	}
+	midDH, _ := mid.DataHash()
+	byDH, err := w.PayloadsByDataHashes([]string{midDH})
+	if err != nil || len(byDH) != 1 {
+		t.Fatalf("PayloadsByDataHashes failed: len=%d err=%v", len(byDH), err)
+	}
+	wrapped, err := w.WrappedPayloads()
+	if err != nil || len(wrapped) != 3 {
+		t.Fatalf("WrappedPayloads failed: len=%d err=%v", len(wrapped), err)
+	}
+	res := w.ToResult()
+	if len(res) != 3 {
+		t.Fatalf("ToResult len: got %d want 3", len(res))
+	}
+
+	// ParseTuple propagates malformed error tuple
+	if _, err := boundwitness.ParseTuple([]byte(`[{}, [], "not-an-array"]`)); err == nil {
+		t.Fatal("expected ParseTuple to reject malformed tuple[2]")
 	}
 }

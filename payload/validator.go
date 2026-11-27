@@ -96,12 +96,18 @@ func (w *PayloadWrapper) Validate() []error {
 		return errs
 	}
 	if storedHash, ok := ap.String("_hash"); ok && storedHash != "" {
-		if actual, err := w.Hash(); err == nil && actual != storedHash {
+		actual, err := w.Hash()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("compute _hash: %w", err))
+		} else if actual != storedHash {
 			errs = append(errs, fmt.Errorf("_hash mismatch: stored %s != computed %s", storedHash, actual))
 		}
 	}
 	if storedDataHash, ok := ap.String("_dataHash"); ok && storedDataHash != "" {
-		if actual, err := w.DataHash(); err == nil && actual != storedDataHash {
+		actual, err := w.DataHash()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("compute _dataHash: %w", err))
+		} else if actual != storedDataHash {
 			errs = append(errs, fmt.Errorf("_dataHash mismatch: stored %s != computed %s", storedDataHash, actual))
 		}
 	}

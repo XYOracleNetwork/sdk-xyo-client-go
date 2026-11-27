@@ -26,20 +26,12 @@ func ValidateQueryBoundWitness(qbw *QueryBoundWitness) []error {
 	errs := validateBoundWitnessCore(&qbw.BoundWitness, qbw)
 	if qbw.Query == "" {
 		errs = append(errs, errors.New("query bound witness missing query hash"))
-	} else {
-		found := false
-		for _, h := range qbw.PayloadHashes {
-			if h == qbw.Query {
-				found = true
-				break
-			}
-		}
-		if !found {
-			// Note: Query is dataHash while payload_hashes contains root hash; they match when query has no $ meta.
-			// We only require Query to be a 64-char hex string.
-			if len(qbw.Query) != 64 {
-				errs = append(errs, fmt.Errorf("invalid query hash length: %d", len(qbw.Query)))
-			}
+	} else if !isValidHashHex(qbw.Query) {
+		errs = append(errs, fmt.Errorf("invalid query hash: %q", qbw.Query))
+	}
+	for i, eh := range qbw.ErrorHashes {
+		if !isValidHashHex(eh) {
+			errs = append(errs, fmt.Errorf("invalid error_hashes[%d]: %q", i, eh))
 		}
 	}
 	return errs
@@ -58,21 +50,33 @@ func validateBoundWitnessCore(bw *BoundWitness, hashTarget any) []error {
 
 	seenAddr := make(map[string]struct{}, len(bw.Addresses))
 	for i, addr := range bw.Addresses {
-		if !account.IsAddress(addr) {
+		norm, err := account.NormalizeAddress(addr)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("addresses[%d] invalid XYO address: %q", i, addr))
+			continue
 		}
-		if _, dup := seenAddr[addr]; dup {
+		if _, dup := seenAddr[norm]; dup {
 			errs = append(errs, fmt.Errorf("duplicate address in bound witness: %s", addr))
 		}
-		seenAddr[addr] = struct{}{}
+		seenAddr[norm] = struct{}{}
 	}
 
 	if len(bw.PreviousHashes) != len(bw.Addresses) {
 		errs = append(errs, fmt.Errorf("previous_hashes length (%d) != addresses length (%d)", len(bw.PreviousHashes), len(bw.Addresses)))
 	}
+	for i, ph := range bw.PreviousHashes {
+		if ph != nil && !isValidHashHex(*ph) {
+			errs = append(errs, fmt.Errorf("invalid previous_hashes[%d]: %q", i, *ph))
+		}
+	}
 
 	if len(bw.PayloadHashes) != len(bw.PayloadSchemas) {
 		errs = append(errs, fmt.Errorf("payload_hashes length (%d) != payload_schemas length (%d)", len(bw.PayloadHashes), len(bw.PayloadSchemas)))
+	}
+	for i, h := range bw.PayloadHashes {
+		if !isValidHashHex(h) {
+			errs = append(errs, fmt.Errorf("invalid payload_hashes[%d]: %q", i, h))
+		}
 	}
 
 	for i, s := range bw.PayloadSchemas {
@@ -104,4 +108,18 @@ func validateBoundWitnessCore(bw *BoundWitness, hashTarget any) []error {
 	}
 
 	return errs
+}
+
+func isValidHashHex(h string) bool {
+	clean := account.StripHexPrefix(h)
+	if len(clean) != 64 {
+		return false
+	}
+	for i := 0; i < len(clean); i++ {
+		c := clean[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }

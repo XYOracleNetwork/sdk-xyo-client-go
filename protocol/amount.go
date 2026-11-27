@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"fmt"
 	"math/big"
 	"strings"
 )
@@ -13,6 +14,7 @@ type ShiftedBigIntConfig struct {
 	MinDecimals       int
 	GroupingSeparator string
 	DecimalSeparator  string
+	DisableGrouping   bool
 }
 
 // DefaultShiftedBigIntConfig returns the standard en_US XL1 display configuration
@@ -37,7 +39,9 @@ type ShiftedBigInt struct {
 
 // NewShiftedBigInt creates a ShiftedBigInt with value and config.
 func NewShiftedBigInt(value *big.Int, cfg ShiftedBigIntConfig) ShiftedBigInt {
-	if cfg.GroupingSeparator == "" {
+	if cfg.DisableGrouping {
+		cfg.GroupingSeparator = ""
+	} else if cfg.GroupingSeparator == "" {
 		cfg.GroupingSeparator = ","
 	}
 	if cfg.DecimalSeparator == "" {
@@ -237,4 +241,75 @@ func (a XL1Amount) ToShortString() string {
 // Format formats the amount using a custom ShiftedBigIntConfig.
 func (a XL1Amount) Format(cfg ShiftedBigIntConfig) string {
 	return NewShiftedBigInt(a.atto.BigInt(), cfg).ToShortString()
+}
+
+// ZeroAmount returns a zero XL1Amount.
+func ZeroAmount() XL1Amount {
+	return AmountFromAtto(bigZero)
+}
+
+// AmountFromString parses a human-readable decimal string (e.g. "1,234.5" with places=PlacesXL1) into an XL1Amount.
+func AmountFromString(s string, places int) (XL1Amount, error) {
+	cleaned := strings.ReplaceAll(strings.TrimSpace(s), ",", "")
+	if cleaned == "" {
+		return XL1Amount{}, fmt.Errorf("empty amount string")
+	}
+	if strings.HasPrefix(cleaned, "-") {
+		return XL1Amount{}, ErrNegativeAmount
+	}
+	parts := strings.Split(cleaned, ".")
+	if len(parts) > 2 {
+		return XL1Amount{}, fmt.Errorf("invalid decimal amount %q", s)
+	}
+	intPartStr := parts[0]
+	if intPartStr == "" {
+		intPartStr = "0"
+	}
+	intVal, ok := new(big.Int).SetString(intPartStr, 10)
+	if !ok {
+		return XL1Amount{}, fmt.Errorf("invalid integer part in %q", s)
+	}
+	total := new(big.Int).Mul(intVal, AttoConvertFactor(places))
+	if len(parts) == 2 && parts[1] != "" {
+		fracStr := parts[1]
+		if places <= 0 {
+			return AmountFromAtto(total), nil
+		}
+		if len(fracStr) > places {
+			fracStr = fracStr[:places]
+		} else if len(fracStr) < places {
+			fracStr += strings.Repeat("0", places-len(fracStr))
+		}
+		fracVal, ok := new(big.Int).SetString(fracStr, 10)
+		if !ok {
+			return XL1Amount{}, fmt.Errorf("invalid fractional part in %q", s)
+		}
+		total.Add(total, fracVal)
+	}
+	return AmountFromAtto(total), nil
+}
+
+// Add returns a + other clamped to [0, maxAtto].
+func (a XL1Amount) Add(other XL1Amount) XL1Amount {
+	return AmountFromAtto(new(big.Int).Add(a.atto.BigInt(), other.atto.BigInt()))
+}
+
+// Sub returns a - other clamped to [0, maxAtto].
+func (a XL1Amount) Sub(other XL1Amount) XL1Amount {
+	return AmountFromAtto(new(big.Int).Sub(a.atto.BigInt(), other.atto.BigInt()))
+}
+
+// Cmp compares a and other, returning -1, 0, or +1.
+func (a XL1Amount) Cmp(other XL1Amount) int {
+	return a.atto.Cmp(other.atto)
+}
+
+// Equal reports whether a and other represent the exact same AttoXL1 value.
+func (a XL1Amount) Equal(other XL1Amount) bool {
+	return a.Cmp(other) == 0
+}
+
+// String implements fmt.Stringer returning the default short XL1 string.
+func (a XL1Amount) String() string {
+	return a.ToShortString()
 }

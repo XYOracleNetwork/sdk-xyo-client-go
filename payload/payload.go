@@ -238,6 +238,182 @@ func Hashes[T any](payloads []T) ([]string, error) {
 	return out, nil
 }
 
+// QueryFields represents optional query economics/routing fields shared by XYO query payloads.
+type QueryFields struct {
+	Address      string `json:"address,omitempty"`
+	Budget       *int64 `json:"budget,omitempty"`
+	MaxFrequency string `json:"maxFrequency,omitempty"`
+	MinBid       *int64 `json:"minBid,omitempty"`
+}
+
+// HashPair associates a payload with its computed hash (root hash or dataHash).
+type HashPair[T any] struct {
+	Payload T
+	Hash    string
+}
+
+// HashPairs returns (payload, rootHash) pairs for a slice of payloads.
+func HashPairs[T any](payloads []T) ([]HashPair[T], error) {
+	out := make([]HashPair[T], len(payloads))
+	for i, p := range payloads {
+		h, err := Hash(p)
+		if err != nil {
+			return nil, fmt.Errorf("hash payload[%d]: %w", i, err)
+		}
+		out[i] = HashPair[T]{Payload: p, Hash: h}
+	}
+	return out, nil
+}
+
+// DataHashPairs returns (payload, dataHash) pairs for a slice of payloads.
+func DataHashPairs[T any](payloads []T) ([]HashPair[T], error) {
+	out := make([]HashPair[T], len(payloads))
+	for i, p := range payloads {
+		h, err := DataHash(p)
+		if err != nil {
+			return nil, fmt.Errorf("dataHash payload[%d]: %w", i, err)
+		}
+		out[i] = HashPair[T]{Payload: p, Hash: h}
+	}
+	return out, nil
+}
+
+// ToHashMap indexes payloads by their root hash.
+func ToHashMap[T any](payloads []T) (map[string]T, error) {
+	out := make(map[string]T, len(payloads))
+	for i, p := range payloads {
+		h, err := Hash(p)
+		if err != nil {
+			return nil, fmt.Errorf("hash payload[%d]: %w", i, err)
+		}
+		out[h] = p
+	}
+	return out, nil
+}
+
+// ToDataHashMap indexes payloads by their dataHash.
+func ToDataHashMap[T any](payloads []T) (map[string]T, error) {
+	out := make(map[string]T, len(payloads))
+	for i, p := range payloads {
+		h, err := DataHash(p)
+		if err != nil {
+			return nil, fmt.Errorf("dataHash payload[%d]: %w", i, err)
+		}
+		out[h] = p
+	}
+	return out, nil
+}
+
+// FilterExcludeByHash returns payloads whose root hash is NOT in excludeHashes.
+func FilterExcludeByHash[T any](payloads []T, excludeHashes []string) ([]T, error) {
+	set := make(map[string]struct{}, len(excludeHashes))
+	for _, h := range excludeHashes {
+		set[strings.ToLower(h)] = struct{}{}
+	}
+	var out []T
+	for i, p := range payloads {
+		h, err := Hash(p)
+		if err != nil {
+			return nil, fmt.Errorf("hash payload[%d]: %w", i, err)
+		}
+		if _, found := set[h]; !found {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// FilterExcludeByDataHash returns payloads whose dataHash is NOT in excludeHashes.
+func FilterExcludeByDataHash[T any](payloads []T, excludeHashes []string) ([]T, error) {
+	set := make(map[string]struct{}, len(excludeHashes))
+	for _, h := range excludeHashes {
+		set[strings.ToLower(h)] = struct{}{}
+	}
+	var out []T
+	for i, p := range payloads {
+		h, err := DataHash(p)
+		if err != nil {
+			return nil, fmt.Errorf("dataHash payload[%d]: %w", i, err)
+		}
+		if _, found := set[h]; !found {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// FilterIncludeByHash returns payloads whose root hash IS in includeHashes.
+func FilterIncludeByHash[T any](payloads []T, includeHashes []string) ([]T, error) {
+	set := make(map[string]struct{}, len(includeHashes))
+	for _, h := range includeHashes {
+		set[strings.ToLower(h)] = struct{}{}
+	}
+	var out []T
+	for i, p := range payloads {
+		h, err := Hash(p)
+		if err != nil {
+			return nil, fmt.Errorf("hash payload[%d]: %w", i, err)
+		}
+		if _, found := set[h]; found {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// FilterIncludeByDataHash returns payloads whose dataHash IS in includeHashes.
+func FilterIncludeByDataHash[T any](payloads []T, includeHashes []string) ([]T, error) {
+	set := make(map[string]struct{}, len(includeHashes))
+	for _, h := range includeHashes {
+		set[strings.ToLower(h)] = struct{}{}
+	}
+	var out []T
+	for i, p := range payloads {
+		h, err := DataHash(p)
+		if err != nil {
+			return nil, fmt.Errorf("dataHash payload[%d]: %w", i, err)
+		}
+		if _, found := set[h]; found {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// FindByHash finds the first payload whose root hash matches targetHash.
+func FindByHash[T any](payloads []T, targetHash string) (T, bool, error) {
+	target := strings.ToLower(targetHash)
+	for i, p := range payloads {
+		h, err := Hash(p)
+		if err != nil {
+			var zero T
+			return zero, false, fmt.Errorf("hash payload[%d]: %w", i, err)
+		}
+		if h == target {
+			return p, true, nil
+		}
+	}
+	var zero T
+	return zero, false, nil
+}
+
+// FindByDataHash finds the first payload whose dataHash matches targetHash.
+func FindByDataHash[T any](payloads []T, targetHash string) (T, bool, error) {
+	target := strings.ToLower(targetHash)
+	for i, p := range payloads {
+		h, err := DataHash(p)
+		if err != nil {
+			var zero T
+			return zero, false, fmt.Errorf("dataHash payload[%d]: %w", i, err)
+		}
+		if h == target {
+			return p, true, nil
+		}
+	}
+	var zero T
+	return zero, false, nil
+}
+
 // DataHashes computes dataHashes for a slice of payloads.
 func DataHashes[T any](payloads []T) ([]string, error) {
 	out := make([]string, len(payloads))

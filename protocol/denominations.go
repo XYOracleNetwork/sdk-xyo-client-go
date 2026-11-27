@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -62,26 +64,27 @@ func validateDenomination(v *big.Int, places int) (*big.Int, error) {
 	return new(big.Int).Set(v), nil
 }
 
-func parseBigIntAuto(s string) (*big.Int, error) {
+func parseBigIntString(s string) (*big.Int, error) {
 	trimmed := strings.TrimSpace(s)
 	if trimmed == "" {
 		return nil, errors.New("empty numeric string")
 	}
 	if strings.HasPrefix(trimmed, "0x") || strings.HasPrefix(trimmed, "0X") {
-		v, ok := new(big.Int).SetString(trimmed[2:], 16)
+		hexPart := trimmed[2:]
+		if hexPart == "" {
+			return nil, fmt.Errorf("empty hex integer: %q", s)
+		}
+		v, ok := new(big.Int).SetString(hexPart, 16)
 		if !ok {
 			return nil, fmt.Errorf("invalid hex integer: %q", s)
 		}
 		return v, nil
 	}
-	// Try base 10 first; if non-decimal hex digits exist, try base 16
-	if v, ok := new(big.Int).SetString(trimmed, 10); ok {
-		return v, nil
+	v, ok := new(big.Int).SetString(trimmed, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid decimal integer: %q", s)
 	}
-	if v, ok := new(big.Int).SetString(trimmed, 16); ok {
-		return v, nil
-	}
-	return nil, fmt.Errorf("invalid integer: %q", s)
+	return v, nil
 }
 
 // AttoXL1 represents the base XL1 denomination (10^0 atto = 10^-18 XL1).
@@ -117,24 +120,64 @@ func NewAttoXL1Int64(v int64) (AttoXL1, error) {
 	return NewAttoXL1(big.NewInt(v))
 }
 
+// AttoXL1FromString parses a decimal string (or 0x-prefixed hex string) into an AttoXL1.
 func AttoXL1FromString(s string) (AttoXL1, error) {
-	v, err := parseBigIntAuto(s)
+	v, err := parseBigIntString(s)
 	if err != nil {
 		return AttoXL1{}, err
 	}
 	return NewAttoXL1(v)
 }
 
+// AttoXL1FromHex strictly parses a hexadecimal string (bare hex or 0x-prefixed) into an AttoXL1.
 func AttoXL1FromHex(hexStr string) (AttoXL1, error) {
 	clean := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(hexStr), "0x"), "0X")
 	if clean == "" {
-		return AttoXL1{v: big.NewInt(0)}, nil
+		return AttoXL1{}, errors.New("empty hex AttoXL1")
 	}
 	v, ok := new(big.Int).SetString(clean, 16)
 	if !ok {
 		return AttoXL1{}, fmt.Errorf("invalid hex AttoXL1: %q", hexStr)
 	}
 	return NewAttoXL1(v)
+}
+
+// MarshalJSON encodes AttoXL1 as a base-10 JSON string to preserve full arbitrary precision.
+func (a AttoXL1) MarshalJSON() ([]byte, error) {
+	return json.Marshal(a.String())
+}
+
+// UnmarshalJSON decodes AttoXL1 from a JSON decimal/0x-hex string or JSON integer number.
+func (a *AttoXL1) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		a.v = big.NewInt(0)
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err != nil {
+			return err
+		}
+		parsed, err := AttoXL1FromString(s)
+		if err != nil {
+			return err
+		}
+		*a = parsed
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.UseNumber()
+	var n json.Number
+	if err := dec.Decode(&n); err != nil {
+		return fmt.Errorf("unmarshal AttoXL1: %w", err)
+	}
+	parsed, err := AttoXL1FromString(n.String())
+	if err != nil {
+		return err
+	}
+	*a = parsed
+	return nil
 }
 
 func (a AttoXL1) BigInt() *big.Int {

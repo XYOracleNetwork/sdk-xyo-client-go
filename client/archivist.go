@@ -268,9 +268,20 @@ func (m *MemoryArchivist) Delete(_ context.Context, hashes []string) ([]string, 
 	defer m.mu.Unlock()
 	var deleted []string
 	for _, h := range hashes {
-		if _, ok := m.byHash[h]; ok {
-			delete(m.byHash, h)
-			deleted = append(deleted, h)
+		target := h
+		p, ok := m.byHash[target]
+		if !ok {
+			if rootHash, found := m.byData[h]; found {
+				target = rootHash
+				p, ok = m.byHash[target]
+			}
+		}
+		if ok {
+			delete(m.byHash, target)
+			if dh, hasDH := p.String("_dataHash"); hasDH && m.byData[dh] == target {
+				delete(m.byData, dh)
+			}
+			deleted = append(deleted, target)
 		}
 	}
 	if len(deleted) > 0 {
@@ -309,20 +320,53 @@ func (m *MemoryArchivist) Clear(_ context.Context) error {
 func (m *MemoryArchivist) Next(_ context.Context, opts *ArchivistNextOptions) ([]payload.AnyPayload, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	all := make([]payload.AnyPayload, 0, len(m.order))
+	orderedHashes := make([]string, 0, len(m.order))
 	if opts != nil && opts.Order == "desc" {
 		for i := len(m.order) - 1; i >= 0; i-- {
-			all = append(all, m.byHash[m.order[i]])
+			orderedHashes = append(orderedHashes, m.order[i])
 		}
 	} else {
-		for _, h := range m.order {
-			all = append(all, m.byHash[h])
+		orderedHashes = append(orderedHashes, m.order...)
+	}
+
+	startIdx := 0
+	if opts != nil && opts.Cursor != "" {
+		cursorHash := opts.Cursor
+		if mapped, ok := m.byData[cursorHash]; ok {
+			cursorHash = mapped
+		}
+		found := false
+		for i, h := range orderedHashes {
+			if h == cursorHash {
+				found = true
+				if opts.Open != nil && !*opts.Open {
+					startIdx = i
+				} else {
+					startIdx = i + 1
+				}
+				break
+			}
+		}
+		if !found {
+			return nil, nil
 		}
 	}
-	if opts != nil && opts.Limit != nil && *opts.Limit >= 0 && *opts.Limit < len(all) {
-		all = all[:*opts.Limit]
+
+	if startIdx >= len(orderedHashes) {
+		return nil, nil
 	}
-	return all, nil
+	sliceHashes := orderedHashes[startIdx:]
+	if opts != nil && opts.Limit != nil && *opts.Limit >= 0 && *opts.Limit < len(sliceHashes) {
+		sliceHashes = sliceHashes[:*opts.Limit]
+	}
+
+	out := make([]payload.AnyPayload, 0, len(sliceHashes))
+	for _, h := range sliceHashes {
+		if p, ok := m.byHash[h]; ok {
+			out = append(out, p)
+		}
+	}
+	return out, nil
 }
 
 func (m *MemoryArchivist) Commit(ctx context.Context) ([]*boundwitness.BoundWitness, error) {

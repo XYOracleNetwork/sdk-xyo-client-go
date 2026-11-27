@@ -48,11 +48,34 @@ func Bip85DeriveEntropy(master *ExtendedKey, path string, numBytes int) ([]byte,
 	return Bip85EntropyFromKey(derived.Key, numBytes)
 }
 
-func isBip85Path(path string) bool {
+// Bip85DefaultLeafTail returns the BIP-85 hex-entropy leaf tail for the given hardened index:
+// "83696968'/128169'/32'/<index>'".
+func Bip85DefaultLeafTail(index uint32) string {
+	return fmt.Sprintf("%d'/%d'/%d'/%d'", Bip85Purpose, Bip85HexApp, Bip85SeedBytes, index)
+}
+
+// IsBip85AbsolutePath reports whether path is an absolute BIP-85 path starting with "m/83696968'" (or h/H).
+func IsBip85AbsolutePath(path string) bool {
+	clean := strings.TrimSpace(path)
+	if !strings.HasPrefix(clean, "m/") && !strings.HasPrefix(clean, "M/") {
+		return false
+	}
+	rest := clean[2:]
+	return strings.HasPrefix(rest, "83696968'") ||
+		strings.HasPrefix(rest, "83696968h") ||
+		strings.HasPrefix(rest, "83696968H")
+}
+
+// IsUnderBip85Purpose reports whether path (absolute or relative) is under the BIP-85 purpose 83696968'.
+func IsUnderBip85Purpose(path string) bool {
 	clean := strings.TrimSpace(path)
 	clean = strings.TrimPrefix(clean, "m/")
 	clean = strings.TrimPrefix(clean, "M/")
 	return strings.HasPrefix(clean, "83696968'") ||
 		strings.HasPrefix(clean, "83696968h") ||
 		strings.HasPrefix(clean, "83696968H")
+}
+
+func isBip85Path(path string) bool {
+	return IsUnderBip85Purpose(path)
 }

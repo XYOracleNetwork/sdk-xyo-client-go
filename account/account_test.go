@@ -267,12 +267,106 @@ func TestQuantAccountNistAcvpVector(t *testing.T) {
 }
 
 func TestBip85AndQuantHDWallet(t *testing.T) {
-	// BIP-85 spec test vector master key (seed: "install scatter logic circle gorilla mega boost badge")
-	// Root key from xprv9s21ZrQH143K2LBWUUQRFXhucrQqBpKdRRxNVq2zBqsx8HVqFk2uYo8kmbaLLHRdqtQpUm98uKfu3vca1LqdGhUtyoFnCNkfmXRyPXLjbKb:
-	// Chain code & private key extracted from BIP-85 spec:
-	keyBytes, _ := hex.DecodeString("0314110b9e5607f57f82c1e6e5888130a4e3f6e409d306f0f0294df6e8590b8a")
-	ccBytes, _ := hex.DecodeString("53430e48f48c0142f2d2153680200b31f108b062272f2950205f092c12f4c15e")
-	// Verify directly via BIP-39 mnemonic -> QuantHDWallet determinism
+	// BIP-85 spec test vectors (matching Android Bip85Test.kt & QuantHDWalletTest.kt)
+	const bip85MasterXprv = "xprv9s21ZrQH143K2LBWUUQRFXhucrQqBpKdRRxNVq2zBqsx8HVqFk2uYo8kmbaLLHRdqtQpUm98uKfu3vca1LqdGhUtyoFnCNkfmXRyPXLjbKb"
+
+	// BIP-85 path helpers
+	if got := account.Bip85DefaultLeafTail(0); got != "83696968'/128169'/32'/0'" {
+		t.Fatalf("Bip85DefaultLeafTail(0) = %q", got)
+	}
+	if got := account.Bip85DefaultLeafTail(5); got != "83696968'/128169'/32'/5'" {
+		t.Fatalf("Bip85DefaultLeafTail(5) = %q", got)
+	}
+	if !account.IsBip85AbsolutePath("m/83696968'/128169'") || account.IsBip85AbsolutePath("m/44'/60'/0'/0/0") {
+		t.Fatal("IsBip85AbsolutePath mismatch")
+	}
+	if !account.IsUnderBip85Purpose("m/83696968'") || !account.IsUnderBip85Purpose("83696968'/128169'") || account.IsUnderBip85Purpose("m/44'/60'/0'/0/0") {
+		t.Fatal("IsUnderBip85Purpose mismatch")
+	}
+
+	master, err := account.ParseExtendedKey(bip85MasterXprv)
+	if err != nil {
+		t.Fatalf("ParseExtendedKey: %v", err)
+	}
+	// Serialize round-trip check
+	if roundTripped, err := account.ParseExtendedKey(master.Serialize()); err != nil || !bytes.Equal(roundTripped.Key, master.Key) || !bytes.Equal(roundTripped.ChainCode, master.ChainCode) {
+		t.Fatalf("ExtendedKey serialize/parse round-trip failed: %v", err)
+	}
+
+	bip85Vectors := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"spec-hmac-case-1", "m/83696968'/0'/0'", "efecfbccffea313214232d29e71563d941229afb4338c21f9517c41aaa0d16f0"},
+		{"spec-hmac-case-2", "m/83696968'/0'/1'", "70c6e3e8ebee8dc4c0dbba66076819bb8c09672527c4277ca8729532ad711872"},
+		{"spec-hex-entropy-app", "m/83696968'/128169'/64'/0'", "492db4698cf3b73a5a24998aa3e9d7fa96275d85724a91e71aa2d645442f8785"},
+	}
+	for _, tc := range bip85Vectors {
+		t.Run(tc.name, func(t *testing.T) {
+			ent, err := account.Bip85DeriveEntropy(master, tc.path, 32)
+			if err != nil {
+				t.Fatalf("Bip85DeriveEntropy(%s): %v", tc.path, err)
+			}
+			if got := hex.EncodeToString(ent); got != tc.want {
+				t.Errorf("BIP-85 %s:\n got  %s\n want %s", tc.path, got, tc.want)
+			}
+		})
+	}
+
+	// QuantHDWallet from xprv (matching Android QuantHDWalletTest.kt)
+	testHash, _ := hex.DecodeString("4b688df40bcedbe641ddb16ff0a1842d9c67ea1c3bf63f3e0471baa664531d1a")
+	rootQW, err := account.QuantWalletFromExtendedKeyString(bip85MasterXprv)
+	if err != nil {
+		t.Fatalf("QuantWalletFromExtendedKeyString: %v", err)
+	}
+	if len(rootQW.AddressBytes()) != 20 || len(rootQW.Address()) != 43 || !account.IsQuantAddress(rootQW.Address()) {
+		t.Fatalf("unexpected quant root address: %q", rootQW.Address())
+	}
+	sig, err := rootQW.Sign(testHash)
+	if err != nil || !rootQW.Verify(testHash, sig) {
+		t.Fatalf("rootQW sign/verify failed: err=%v", err)
+	}
+
+	child5, err := rootQW.DerivePath("m/83696968'/128169'/32'/5'")
+	if err != nil {
+		t.Fatalf("DerivePath bip85 explicit: %v", err)
+	}
+	if child5.Address() == rootQW.Address() || len(child5.Address()) != 43 {
+		t.Fatalf("unexpected child5 address: %q", child5.Address())
+	}
+	if sig5, err := child5.Sign(testHash); err != nil || !child5.Verify(testHash, sig5) {
+		t.Fatalf("child5 sign/verify failed: %v", err)
+	}
+
+	childBase, err := rootQW.DerivePath("m/83696968'/0'/0'")
+	if err != nil || !account.IsQuantAddress(childBase.Address()) {
+		t.Fatalf("DerivePath bip85 base case failed: %v", err)
+	}
+
+	childClassical, err := rootQW.DerivePath("m/44'/60'/0'/0/7")
+	if err != nil || !account.IsQuantAddress(childClassical.Address()) {
+		t.Fatalf("DerivePath classical auto-leaf failed: %v", err)
+	}
+
+	// Determinism across separate master loads
+	rootQW2, err := account.QuantWalletFromExtendedKeyString(bip85MasterXprv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a42, err := rootQW.DerivePath("m/83696968'/128169'/32'/42'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b42, err := rootQW2.DerivePath("m/83696968'/128169'/32'/42'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a42.Address() != b42.Address() {
+		t.Fatalf("non-deterministic derivation: %s vs %s", a42.Address(), b42.Address())
+	}
+
+	// Verify BIP-39 mnemonic -> QuantHDWallet determinism
 	mnemonic := "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 	qw1, err := account.QuantWalletFromMnemonic(mnemonic, "")
 	if err != nil {
@@ -285,10 +379,6 @@ func TestBip85AndQuantHDWallet(t *testing.T) {
 	if qw1.Address() != qw2.Address() {
 		t.Fatalf("quant wallet default path mismatch: %s vs %s", qw1.Address(), qw2.Address())
 	}
-	if !account.IsQuantAddress(qw1.Address()) {
-		t.Fatalf("expected valid qm65 address, got %s", qw1.Address())
-	}
-	// Classical path auto-appends BIP-85 leaf
 	qwClassical, err := account.QuantWalletFromMnemonic(mnemonic, "m/44'/60'/0'/0/0")
 	if err != nil {
 		t.Fatal(err)
@@ -296,11 +386,140 @@ func TestBip85AndQuantHDWallet(t *testing.T) {
 	if qwClassical.Address() == qw1.Address() {
 		t.Fatal("different derivation paths should yield different quant addresses")
 	}
-	// Verify Bip85EntropyFromKey basic properties
-	_ = ccBytes
-	ent, err := account.Bip85EntropyFromKey(keyBytes, 32)
-	if err != nil || len(ent) != 32 {
-		t.Fatalf("Bip85EntropyFromKey failed: %v", err)
+}
+
+func TestSwiftWalletVectorAndEdgeCases(t *testing.T) {
+	// Swift WalletVectors.swift reference vector (compressed + uncompressed + address)
+	phrase := "later puppy sound rebuild rebuild noise ozone amazing hope broccoli crystal grief"
+	if !account.IsValidMnemonic("  LATER   PUPPY sound rebuild rebuild noise ozone amazing hope broccoli crystal grief  ") {
+		t.Fatal("IsValidMnemonic should normalize case and whitespace")
+	}
+	w, err := account.WalletFromMnemonic(phrase, account.DefaultDerivationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := w.PrivateKeyHex(); got != "96a7705eedbb701a03ee235911253fd3eb80e48a06106c0bf957d42b72bd8efa" {
+		t.Errorf("privKey: got %s", got)
+	}
+	if got := w.Address(); got != "e46c258c74c7c1df33d7caa4c2c664dc0843ab3f" {
+		t.Errorf("address: got %s", got)
+	}
+	if got := hex.EncodeToString(w.PublicKey()); got != "03a9f10779cb44e73a1983b8225ce9de96ff63cbc8a2900db102fa55a38a14b206" {
+		t.Errorf("compressed pubKey: got %s", got)
+	}
+	if got := "04" + w.PublicKeyUncompressedHex(); got != "04a9f10779cb44e73a1983b8225ce9de96ff63cbc8a2900db102fa55a38a14b206f850a6decf0d0277c8ea237d865a06b6237f07eaf4273217ed6b2ed830161bef" {
+		t.Errorf("uncompressed pubKey: got %s", got)
+	}
+	if len(w.KeccakBytes()) != 32 {
+		t.Fatalf("expected 32-byte KeccakBytes, got %d", len(w.KeccakBytes()))
+	}
+
+	// Absolute path derivation from child wallet uses master
+	sibling, err := w.DerivePath("m/44'/60'/0'/0/1")
+	if err != nil {
+		t.Fatalf("derive sibling absolute path: %v", err)
+	}
+	direct1, err := account.WalletFromMnemonic(phrase, "m/44'/60'/0'/0/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sibling.Address() != direct1.Address() {
+		t.Fatalf("sibling address mismatch: %s vs %s", sibling.Address(), direct1.Address())
+	}
+
+	// Non-root ExtendedKey without master rejects unrelated absolute path
+	nonRoot, err := account.WalletFromExtendedKey(w.ExtendedKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nonRoot.DerivePath("m/44'/60'/0'/0/1"); err == nil {
+		t.Fatal("expected error deriving absolute path on non-root wallet without master")
+	}
+
+	// WithPreviousHashHex rejects invalid hex
+	if _, err := account.RandomAccount(account.WithPreviousHashHex("not-valid-hex!!!")); err == nil {
+		t.Fatal("expected error for invalid WithPreviousHashHex")
+	}
+	if _, err := account.RandomQuantAccount(account.WithPreviousHashHex("not-valid-hex!!!")); err == nil {
+		t.Fatal("expected error for invalid WithPreviousHashHex on QuantAccount")
+	}
+
+	// Bech32m 90-char limit & checksum tamper (matching Android XyoAddressTest)
+	if _, err := account.EncodeBech32m("qm65", make([]byte, 60)); err == nil {
+		t.Fatal("expected BIP-350 >90 char error from EncodeBech32m")
+	}
+	const validQuant = "qm651qyyq79says4nyw2qga892hrrdfchsluxleee2j"
+	if decoded := account.TryDecodeQuantAddress(validQuant); decoded == nil || decoded.HRP != "qm65" || len(decoded.Bytes) != 20 {
+		t.Fatalf("TryDecodeQuantAddress failed: %+v", decoded)
+	}
+	tampered := validQuant[:len(validQuant)-1] + "q"
+	if account.IsQuantAddress(tampered) || account.TryDecodeQuantAddress(tampered) != nil {
+		t.Fatal("tampered quant address checksum must be rejected")
+	}
+}
+
+func TestFilePreviousHashStoreRollbackOnPersistError(t *testing.T) {
+	// Point FilePreviousHashStore at a directory path so os.Rename(tmp, dir) fails
+	dir := t.TempDir()
+	badTarget := filepath.Join(dir, "blocker")
+	if err := os.Mkdir(badTarget, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := account.NewFilePreviousHashStore(filepath.Join(dir, "nonexistent.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store
+
+	// Create a file store whose path is an existing non-empty directory so persist fails on write/rename
+	nonEmptyDir := filepath.Join(dir, "dir_as_file")
+	if err := os.Mkdir(nonEmptyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nonEmptyDir, "child"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Make a normal store first, verify rollback when parent is read-only
+	roDir := filepath.Join(dir, "ro")
+	if err := os.Mkdir(roDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	storePath := filepath.Join(roDir, "hashes.json")
+	fs, err := account.NewFilePreviousHashStore(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := "5e7a847447e7fec41011ae7d32d768f86605ba03"
+	h1 := "1111111111111111111111111111111111111111111111111111111111111111"
+	h2 := "2222222222222222222222222222222222222222222222222222222222222222"
+	if err := fs.SetItem(addr, h1); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(roDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(roDir, 0o700) }()
+
+	// Attempt SetItem/SetItemIfMatch/RemoveItem while dir is read-only (non-root)
+	if os.Geteuid() != 0 {
+		if err := fs.SetItem(addr, h2); err == nil {
+			t.Fatal("expected SetItem error on read-only dir")
+		}
+		if got, ok, _ := fs.GetItem(addr); !ok || got != h1 {
+			t.Fatalf("SetItem failed to rollback in-memory state: got=%q ok=%v", got, ok)
+		}
+		if _, err := fs.SetItemIfMatch(addr, &h1, h2); err == nil {
+			t.Fatal("expected SetItemIfMatch error on read-only dir")
+		}
+		if got, ok, _ := fs.GetItem(addr); !ok || got != h1 {
+			t.Fatalf("SetItemIfMatch failed to rollback in-memory state: got=%q ok=%v", got, ok)
+		}
+		if err := fs.RemoveItem(addr); err == nil {
+			t.Fatal("expected RemoveItem error on read-only dir")
+		}
+		if got, ok, _ := fs.GetItem(addr); !ok || got != h1 {
+			t.Fatalf("RemoveItem failed to rollback in-memory state: got=%q ok=%v", got, ok)
+		}
 	}
 }
 

@@ -182,7 +182,22 @@ func parseQueryResponse(raw []byte) (*ModuleQueryResult, error) {
 			}
 			return &ModuleQueryResult{}, nil
 		}
-		return parseResultTuple(envelope.Data)
+		res, err := parseResultTuple(envelope.Data)
+		if err != nil {
+			return nil, err
+		}
+		for _, rawErr := range envelope.Errors {
+			var modErr payload.ModuleErrorPayload
+			if uErr := json.Unmarshal(rawErr, &modErr); uErr == nil && (modErr.Message != "" || modErr.Name != "") {
+				if modErr.Schema == "" {
+					modErr.Schema = payload.SchemaModuleError
+				}
+				res.Errors = append(res.Errors, modErr)
+			} else {
+				res.Errors = append(res.Errors, payload.NewModuleErrorPayload("EnvelopeError", string(rawErr), ""))
+			}
+		}
+		return res, nil
 	}
 
 	// Direct tuple response: [bw, payloads, errors?]

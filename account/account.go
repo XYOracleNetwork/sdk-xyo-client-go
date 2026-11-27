@@ -57,6 +57,7 @@ type AccountOption func(*accountConfig)
 type accountConfig struct {
 	previousHash      []byte
 	previousHashStore PreviousHashStore
+	initErr           error
 }
 
 // WithPreviousHash initializes an account with a known 32-byte previous hash.
@@ -73,12 +74,15 @@ func WithPreviousHash(hash []byte) AccountOption {
 // WithPreviousHashHex initializes an account with a known hex-encoded previous hash.
 func WithPreviousHashHex(hashHex string) AccountOption {
 	return func(c *accountConfig) {
-		if hashHex == "" {
+		if strings.TrimSpace(hashHex) == "" {
 			return
 		}
-		if b, err := DecodeHex(hashHex); err == nil {
-			c.previousHash = b
+		b, err := DecodeHex(hashHex)
+		if err != nil {
+			c.initErr = fmt.Errorf("invalid previous hash hex %q: %w", hashHex, err)
+			return
 		}
+		c.previousHash = b
 	}
 }
 
@@ -145,6 +149,9 @@ func fromSecp256k1PrivKey(priv *secp256k1.PrivateKey, opts ...AccountOption) (*S
 			opt(&cfg)
 		}
 	}
+	if cfg.initErr != nil {
+		return nil, cfg.initErr
+	}
 
 	pub := priv.PubKey()
 	uncompressed65 := pub.SerializeUncompressed()
@@ -176,9 +183,11 @@ func fromSecp256k1PrivKey(priv *secp256k1.PrivateKey, opts ...AccountOption) (*S
 		if stored, ok, err := acct.previousHashStore.GetItem(acct.addressHex); err != nil {
 			return nil, err
 		} else if ok {
-			if b, decErr := DecodeHex(stored); decErr == nil && len(b) == HashSize {
-				acct.previousHash = b
+			b, decErr := DecodeHex(stored)
+			if decErr != nil || len(b) != HashSize {
+				return nil, fmt.Errorf("invalid stored previous hash: %q", stored)
 			}
+			acct.previousHash = b
 		}
 	}
 
@@ -224,6 +233,39 @@ func (a *Secp256k1Account) PublicKeyUncompressed() []byte {
 // PublicKeyUncompressedHex returns the 128-char lowercase hex uncompressed public key (X||Y, no 0x04).
 func (a *Secp256k1Account) PublicKeyUncompressedHex() string {
 	return hex.EncodeToString(a.pubUncompressed64)
+}
+
+// KeccakBytes returns the 32-byte Keccak-256 hash of the 64-byte uncompressed public key.
+func (a *Secp256k1Account) KeccakBytes() []byte {
+	return Keccak256(a.pubUncompressed64)
+}
+
+// RollbackPreviousHash reverts the account's previous hash from expectedCurrent back to restorePrev
+// if the account's current previous hash still matches expectedCurrent.
+func (a *Secp256k1Account) RollbackPreviousHash(expectedCurrent, restorePrev []byte) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if hex.EncodeToString(a.previousHash) != hex.EncodeToString(expectedCurrent) {
+		return nil
+	}
+	if a.previousHashStore != nil {
+		if len(restorePrev) == 0 {
+			if err := a.previousHashStore.RemoveItem(a.addressHex); err != nil {
+				return err
+			}
+		} else {
+			curHex := hex.EncodeToString(expectedCurrent)
+			if _, err := a.previousHashStore.SetItemIfMatch(a.addressHex, &curHex, hex.EncodeToString(restorePrev)); err != nil {
+				return err
+			}
+		}
+	}
+	if len(restorePrev) == 0 {
+		a.previousHash = nil
+	} else {
+		a.previousHash = append([]byte(nil), restorePrev...)
+	}
+	return nil
 }
 
 func (a *Secp256k1Account) PreviousHash() []byte {

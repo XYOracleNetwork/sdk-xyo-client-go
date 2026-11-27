@@ -104,8 +104,12 @@ func EncodeBech32m(hrp string, payload []byte) (string, error) {
 		return "", err
 	}
 	combined := append(data5, bech32mCreateChecksum(hrp, data5)...)
+	totalLen := len(hrp) + 1 + len(combined)
+	if totalLen > 90 {
+		return "", fmt.Errorf("bech32m encoded length %d exceeds BIP-350 maximum 90", totalLen)
+	}
 	var sb strings.Builder
-	sb.Grow(len(hrp) + 1 + len(combined))
+	sb.Grow(totalLen)
 	sb.WriteString(hrp)
 	sb.WriteByte('1')
 	for _, b := range combined {

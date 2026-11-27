@@ -9,20 +9,26 @@ import (
 
 // Core XYO Protocol 2.0 and XL1 schema constants (Yellow Paper Section 7).
 const (
-	// Core protocol schemas
+	// Core protocol schemas - Section 7.1
 	SchemaBasePayload   = "network.xyo.payload"
 	SchemaBoundWitness  = "network.xyo.boundwitness"
 	SchemaQuery         = "network.xyo.query"
 	SchemaModuleError   = "network.xyo.error.module"
 	SchemaPayloadBundle = "network.xyo.payload.bundle"
+	SchemaPayloadSet    = "network.xyo.payload.set"
 
-	// Core data schemas
+	// Core data schemas - Section 7.7
 	SchemaAddress         = "network.xyo.address"
+	SchemaAddressChild    = "network.xyo.address.child"
+	SchemaAddressPrevious = "network.xyo.address.hash.previous"
 	SchemaConfig          = "network.xyo.config"
 	SchemaDomain          = "network.xyo.domain"
 	SchemaId              = "network.xyo.id"
 	SchemaSchema          = "network.xyo.schema"
 	SchemaValue           = "network.xyo.value"
+	SchemaRange           = "network.xyo.range"
+	SchemaNumber          = "network.xyo.number"
+	SchemaBigInt          = "network.xyo.bigint"
 	SchemaEvent           = "network.xyo.event"
 	SchemaNetwork         = "network.xyo.network"
 	SchemaNetworkNode     = "network.xyo.network.node"
@@ -31,7 +37,7 @@ const (
 	SchemaDebug           = "network.xyo.debug"
 	SchemaTest            = "network.xyo.test"
 
-	// Module config schemas
+	// Module config schemas - Section 7.2
 	SchemaModuleConfig    = "network.xyo.module.config"
 	SchemaArchivistConfig = "network.xyo.archivist.config"
 	SchemaBridgeConfig    = "network.xyo.bridge.config"
@@ -40,14 +46,42 @@ const (
 	SchemaSentinelConfig  = "network.xyo.sentinel.config"
 	SchemaWitnessConfig   = "network.xyo.witness.config"
 
-	// Manifest schemas
-	SchemaPackageManifest = "network.xyo.manifest.package"
-	SchemaNodeManifest    = "network.xyo.manifest.node"
-	SchemaModuleManifest  = "network.xyo.manifest.module"
+	// Manifest schemas - Section 7.4
+	SchemaPackageManifest     = "network.xyo.manifest.package"
+	SchemaPackageDappManifest = "network.xyo.manifest.package.dapp"
+	SchemaNodeManifest        = "network.xyo.manifest.node"
+	SchemaModuleManifest      = "network.xyo.manifest.module"
 
-	// Module payload schemas
-	SchemaModuleState       = "network.xyo.module.state"
-	SchemaModuleDescription = "network.xyo.module.description"
+	// Module payload & filter schemas - Section 7.3
+	SchemaModuleState        = "network.xyo.module.state"
+	SchemaModuleDescription  = "network.xyo.module.description"
+	SchemaModuleFilter       = "network.xyo.module.filter"
+	SchemaChildCertification = "network.xyo.child.certification"
+	SchemaArchivistSnapshot  = "network.xyo.archivist.snapshot"
+	SchemaArchivistStats     = "network.xyo.archivist.stats"
+
+	// Diviner type schemas - Section 7.5
+	SchemaDivinerPayload           = "network.xyo.diviner.payload"
+	SchemaDivinerBoundWitness      = "network.xyo.diviner.boundwitness"
+	SchemaDivinerAddressHistory    = "network.xyo.diviner.address.history"
+	SchemaDivinerAddressChain      = "network.xyo.diviner.address.chain"
+	SchemaDivinerAddressSpace      = "network.xyo.diviner.address.space"
+	SchemaDivinerTransform         = "network.xyo.diviner.transform"
+	SchemaDivinerForecasting       = "network.xyo.diviner.forecasting"
+	SchemaDivinerJSONPath          = "network.xyo.diviner.jsonpath"
+	SchemaDivinerJSONPathAggregate = "network.xyo.diviner.jsonpath.aggregate"
+	SchemaDivinerJSONPatch         = "network.xyo.diviner.jsonpatch"
+	SchemaDivinerIndexing          = "network.xyo.diviner.indexing"
+	SchemaDivinerPayloadPointer    = "network.xyo.diviner.payload.pointer"
+	SchemaDivinerSchemaList        = "network.xyo.diviner.schema.list"
+	SchemaDivinerBoundWitnessStats = "network.xyo.diviner.boundwitness.stats"
+	SchemaDivinerPayloadStats      = "network.xyo.diviner.payload.stats"
+	SchemaDivinerSchemaStats       = "network.xyo.diviner.schema.stats"
+
+	// Automation schemas - Section 7.6
+	SchemaAutomation            = "network.xyo.automation"
+	SchemaAutomationInterval    = "network.xyo.automation.interval"
+	SchemaAutomationEventModule = "network.xyo.automation.event.module"
 
 	// XL1 Chain Protocol schemas
 	SchemaTransfer         = "network.xyo.transfer"
@@ -92,4 +126,12 @@ func SchemaRootDomain(schema string) (string, error) {
 	}
 	parts := strings.Split(schema, ".")
 	return parts[1] + "." + parts[0], nil
+}
+
+// SchemaNameLevels returns the number of dot-separated levels in schema (0 if empty).
+func SchemaNameLevels(schema string) int {
+	if strings.TrimSpace(schema) == "" {
+		return 0
+	}
+	return len(strings.Split(schema, "."))
 }

@@ -83,13 +83,13 @@ func DefaultTransactionFees() TransactionFeesBigInt {
 	}
 }
 
-// ToHex converts fees to 0x-prefixed TransactionFeesHex.
+// ToHex converts fees to bare lowercase hex TransactionFeesHex (matching XL1 wire format).
 func (f TransactionFeesBigInt) ToHex() TransactionFeesHex {
 	return TransactionFeesHex{
-		Base:     f.Base.Hex(),
-		GasLimit: f.GasLimit.Hex(),
-		GasPrice: f.GasPrice.Hex(),
-		Priority: f.Priority.Hex(),
+		Base:     f.Base.BareHex(),
+		GasLimit: f.GasLimit.BareHex(),
+		GasPrice: f.GasPrice.BareHex(),
+		Priority: f.Priority.BareHex(),
 	}
 }
 
@@ -101,6 +101,8 @@ func (f TransactionFeesBigInt) Total() *big.Int {
 }
 
 // TransactionBoundWitness represents an XL1 Transaction BoundWitness ("network.xyo.boundwitness").
+// Unknown JSON fields encountered during unmarshaling are preserved in BoundWitness.Extra
+// so DataHash/Hash and signature verification remain lossless across wire round-trips.
 type TransactionBoundWitness struct {
 	boundwitness.BoundWitness
 	From   string             `json:"from"`
@@ -113,6 +115,115 @@ type TransactionBoundWitness struct {
 	// Optional storage metadata read from RPC responses
 	StoredHash     string `json:"_hash,omitempty"`
 	StoredDataHash string `json:"_dataHash,omitempty"`
+}
+
+var knownTxBWKeys = map[string]struct{}{
+	"addresses":       {},
+	"payload_hashes":  {},
+	"payload_schemas": {},
+	"previous_hashes": {},
+	"schema":          {},
+	"timestamp":       {},
+	"$signatures":     {},
+	"$destination":    {},
+	"$sourceQuery":    {},
+	"$version":        {},
+	"from":            {},
+	"chain":           {},
+	"nbf":             {},
+	"exp":             {},
+	"fees":            {},
+	"script":          {},
+	"_hash":           {},
+	"_dataHash":       {},
+}
+
+// MarshalJSON encodes TransactionBoundWitness including all base BoundWitness fields, tx fields, and Extra.
+func (tx TransactionBoundWitness) MarshalJSON() ([]byte, error) {
+	type txWire struct {
+		Addresses      []string           `json:"addresses"`
+		PayloadHashes  []string           `json:"payload_hashes"`
+		PayloadSchemas []string           `json:"payload_schemas"`
+		PreviousHashes []*string          `json:"previous_hashes"`
+		Schema         string             `json:"schema"`
+		Timestamp      *int64             `json:"timestamp,omitempty"`
+		Signatures     []*string          `json:"$signatures,omitempty"`
+		Destination    string             `json:"$destination,omitempty"`
+		SourceQuery    string             `json:"$sourceQuery,omitempty"`
+		Version        *int               `json:"$version,omitempty"`
+		From           string             `json:"from"`
+		Chain          ChainID            `json:"chain"`
+		Nbf            int64              `json:"nbf"`
+		Exp            int64              `json:"exp"`
+		Fees           TransactionFeesHex `json:"fees"`
+		Script         []string           `json:"script,omitempty"`
+		StoredHash     string             `json:"_hash,omitempty"`
+		StoredDataHash string             `json:"_dataHash,omitempty"`
+	}
+	w := txWire{
+		Addresses:      tx.Addresses,
+		PayloadHashes:  tx.PayloadHashes,
+		PayloadSchemas: tx.PayloadSchemas,
+		PreviousHashes: tx.PreviousHashes,
+		Schema:         tx.Schema,
+		Timestamp:      tx.Timestamp,
+		Signatures:     tx.Signatures,
+		Destination:    tx.Destination,
+		SourceQuery:    tx.SourceQuery,
+		Version:        tx.Version,
+		From:           tx.From,
+		Chain:          tx.Chain,
+		Nbf:            tx.Nbf,
+		Exp:            tx.Exp,
+		Fees:           tx.Fees,
+		Script:         tx.Script,
+		StoredHash:     tx.StoredHash,
+		StoredDataHash: tx.StoredDataHash,
+	}
+	base, err := json.Marshal(w)
+	if err != nil {
+		return nil, err
+	}
+	if len(tx.Extra) == 0 {
+		return base, nil
+	}
+	return mergeExtraJSON(base, tx.Extra)
+}
+
+// UnmarshalJSON decodes TransactionBoundWitness while preserving unknown fields in Extra.
+func (tx *TransactionBoundWitness) UnmarshalJSON(data []byte) error {
+	var baseBW boundwitness.BoundWitness
+	if err := json.Unmarshal(data, &baseBW); err != nil {
+		return err
+	}
+	var txFields struct {
+		From           string             `json:"from"`
+		Chain          ChainID            `json:"chain"`
+		Nbf            int64              `json:"nbf"`
+		Exp            int64              `json:"exp"`
+		Fees           TransactionFeesHex `json:"fees"`
+		Script         []string           `json:"script,omitempty"`
+		StoredHash     string             `json:"_hash,omitempty"`
+		StoredDataHash string             `json:"_dataHash,omitempty"`
+	}
+	if err := json.Unmarshal(data, &txFields); err != nil {
+		return err
+	}
+	extra, err := extractExtraJSON(data, knownTxBWKeys)
+	if err != nil {
+		return err
+	}
+	tx.BoundWitness = baseBW
+	tx.Extra = extra
+	tx.From = txFields.From
+	tx.Chain = txFields.Chain
+	tx.Nbf = txFields.Nbf
+	tx.Exp = txFields.Exp
+	tx.Fees = txFields.Fees
+	tx.Script = txFields.Script
+	tx.StoredHash = txFields.StoredHash
+	tx.StoredDataHash = txFields.StoredDataHash
+	return nil
 }
 
 // Hash computes the root hash of this TransactionBoundWitness.
@@ -264,7 +375,7 @@ func (b *TransactionBuilder) Timestamp(ts int64) *TransactionBuilder {
 
 // Build constructs, elevates, hashes, and signs the XL1 transaction.
 func (b *TransactionBuilder) Build() (*HydratedTransaction, error) {
-	if !b.hasChain || b.chain == "" {
+	if !b.hasChain || strings.TrimSpace(string(b.chain)) == "" {
 		return nil, errors.New("chain must be set")
 	}
 	if b.fees == nil {
@@ -273,13 +384,25 @@ func (b *TransactionBuilder) Build() (*HydratedTransaction, error) {
 	if b.nbf == nil || b.exp == nil {
 		return nil, errors.New("block range (nbf and exp) must be set")
 	}
+	if *b.nbf < 0 {
+		return nil, fmt.Errorf("nbf must be non-negative, got %d", *b.nbf)
+	}
+	if *b.exp <= *b.nbf {
+		return nil, fmt.Errorf("exp (%d) must be greater than nbf (%d)", *b.exp, *b.nbf)
+	}
 
-	from := b.from
+	from := strings.TrimSpace(b.from)
 	if from == "" {
 		if len(b.signers) == 0 {
 			return nil, errors.New("from address or at least one signer must be provided")
 		}
 		from = b.signers[0].Address()
+	} else {
+		normFrom, err := account.NormalizeAddress(from)
+		if err != nil {
+			return nil, fmt.Errorf("invalid from address: %w", err)
+		}
+		from = normFrom
 	}
 
 	payloadHashes := make([]string, len(b.payloads))
@@ -312,8 +435,18 @@ func (b *TransactionBuilder) Build() (*HydratedTransaction, error) {
 
 	addresses := make([]string, len(b.signers))
 	prevHashes := make([]*string, len(b.signers))
+	seenSigners := make(map[string]struct{}, len(b.signers))
 	for i, s := range b.signers {
-		addresses[i] = s.Address()
+		addr := s.Address()
+		norm, err := account.NormalizeAddress(addr)
+		if err != nil {
+			return nil, fmt.Errorf("signer[%d] invalid address: %w", i, err)
+		}
+		if _, dup := seenSigners[norm]; dup {
+			return nil, fmt.Errorf("duplicate signer address: %s", norm)
+		}
+		seenSigners[norm] = struct{}{}
+		addresses[i] = norm
 		prevHashes[i] = s.PreviousHashHex()
 	}
 
@@ -341,12 +474,27 @@ func (b *TransactionBuilder) Build() (*HydratedTransaction, error) {
 		return nil, fmt.Errorf("compute transaction dataHash: %w", err)
 	}
 
+	type rollbackable interface {
+		RollbackPreviousHash(expectedCurrent, restorePrev []byte) error
+	}
+	type snap struct {
+		acct account.Account
+		prev []byte
+	}
+	var signed []snap
 	sigs := make([]*string, len(b.signers))
 	for i, s := range b.signers {
+		prevBefore := s.PreviousHash()
 		sigBytes, err := s.Sign(dataHashBytes)
 		if err != nil {
+			for j := len(signed) - 1; j >= 0; j-- {
+				if rb, ok := signed[j].acct.(rollbackable); ok {
+					_ = rb.RollbackPreviousHash(dataHashBytes, signed[j].prev)
+				}
+			}
 			return nil, fmt.Errorf("sign transaction for %s: %w", s.Address(), err)
 		}
+		signed = append(signed, snap{acct: s, prev: prevBefore})
 		sigHex := hex.EncodeToString(sigBytes)
 		sigs[i] = &sigHex
 	}

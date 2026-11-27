@@ -224,8 +224,9 @@ func writeCanonicalFloat(buf *bytes.Buffer, f float64) error {
 		buf.WriteByte('0')
 		return nil
 	}
-	// Whole numbers within int64 / JS fixed-point range format as plain integers (no .0)
-	if math.Trunc(f) == f && math.Abs(f) < 1e21 && math.Abs(f) <= math.MaxInt64 {
+	// Whole numbers strictly within int64 range [-2^63, 2^63) format as plain integers (no .0).
+	// Note: float64(math.MaxInt64) rounds up to 2^63 (9223372036854775808.0), so strict '<' avoids int64 overflow.
+	if math.Trunc(f) == f && f >= -9223372036854775808.0 && f < 9223372036854775808.0 {
 		buf.WriteString(strconv.FormatInt(int64(f), 10))
 		return nil
 	}

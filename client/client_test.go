@@ -143,6 +143,163 @@ func TestNodeClientAndArchivistWrapperHTTP(t *testing.T) {
 	if _, err := arch.Snapshot(ctx); err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
+	if deleted, err := arch.Delete(ctx, []string{"ada56ff753c0c9b2ce5e1f823eda9ac53501db2843d8883d6cf6869c18ef7f65"}); err != nil || len(deleted) != 1 {
+		t.Fatalf("Delete: deleted=%v err=%v", deleted, err)
+	}
+	if _, err := arch.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	insRes, err := arch.InsertQuery(ctx, payload.NewIdPayload("go-test-2"))
+	if err != nil || insRes.BoundWitness == nil {
+		t.Fatalf("InsertQuery: %v", err)
+	}
+	if dh, err := insRes.BWDataHash(); err != nil || len(dh) != 64 {
+		t.Fatalf("BWDataHash: %q err=%v", dh, err)
+	}
+
+	// Verify APIConfig.EndpointURL and NewArchivistClient
+	cfg := client.APIConfig{Domain: srv.URL + "/", Module: "/Archivist/"}
+	if cfg.EndpointURL() != srv.URL+"/Archivist" {
+		t.Fatalf("EndpointURL: got %q", cfg.EndpointURL())
+	}
+	if _, err := client.NewArchivistClient(cfg, clientAcct); err != nil {
+		t.Fatalf("NewArchivistClient: %v", err)
+	}
+}
+
+func TestMemoryArchivistPaginationDeleteAndClear(t *testing.T) {
+	ctx := context.Background()
+	mem, err := client.NewMemoryArchivist(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p0 := payload.NewIdPayload("0")
+	p1 := payload.NewIdPayload("1")
+	p2 := payload.NewIdPayload("2")
+	p3 := payload.NewIdPayload("3")
+	inserted, err := mem.Insert(ctx, p0, p1, p2, p3)
+	if err != nil || len(inserted) != 4 {
+		t.Fatalf("Insert: len=%d err=%v", len(inserted), err)
+	}
+	h0, _ := inserted[0].String("_hash")
+	h1, _ := inserted[1].String("_hash")
+	dh2, _ := inserted[2].String("_dataHash")
+
+	// Open=true (default) starts strictly after cursor
+	limit := 2
+	pageOpen, err := mem.Next(ctx, &client.ArchivistNextOptions{Cursor: h0, Limit: &limit, Order: "asc"})
+	if err != nil || len(pageOpen) != 2 {
+		t.Fatalf("Next open=default: len=%d err=%v", len(pageOpen), err)
+	}
+	if s, _ := pageOpen[0].String("salt"); s != "1" {
+		t.Fatalf("expected salt=1 after cursor h0, got %q", s)
+	}
+
+	// Open=false includes cursor
+	closed := false
+	pageClosed, err := mem.Next(ctx, &client.ArchivistNextOptions{Cursor: h1, Open: &closed, Limit: &limit, Order: "asc"})
+	if err != nil || len(pageClosed) != 2 {
+		t.Fatalf("Next open=false: len=%d err=%v", len(pageClosed), err)
+	}
+	if s, _ := pageClosed[0].String("salt"); s != "1" {
+		t.Fatalf("expected salt=1 inclusive cursor h1, got %q", s)
+	}
+
+	// Order=desc with cursor
+	pageDesc, err := mem.Next(ctx, &client.ArchivistNextOptions{Cursor: dh2, Order: "desc"})
+	if err != nil || len(pageDesc) != 2 {
+		t.Fatalf("Next desc: len=%d err=%v", len(pageDesc), err)
+	}
+	if s, _ := pageDesc[0].String("salt"); s != "1" {
+		t.Fatalf("expected salt=1 after cursor p2 in desc order, got %q", s)
+	}
+
+	// Delete by dataHash and verify Get no longer finds it
+	deleted, err := mem.Delete(ctx, []string{dh2})
+	if err != nil || len(deleted) != 1 {
+		t.Fatalf("Delete by dataHash: %v err=%v", deleted, err)
+	}
+	if got, _ := mem.Get(ctx, []string{dh2}); len(got) != 0 {
+		t.Fatalf("expected deleted payload gone from byData index, got %d", len(got))
+	}
+
+	// Commit & Snapshot
+	bws, err := mem.Commit(ctx)
+	if err != nil || len(bws) != 1 || len(bws[0].PayloadHashes) != 3 {
+		t.Fatalf("Commit: bws=%+v err=%v", bws, err)
+	}
+
+	// Clear
+	if err := mem.Clear(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if all, _ := mem.All(ctx); len(all) != 0 {
+		t.Fatalf("expected 0 items after Clear, got %d", len(all))
+	}
+}
+
+func TestRemoteModuleResolverAndTypeChecks(t *testing.T) {
+	serverAcct, _ := account.RandomAccount()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		desc := payload.NewAnyPayload(payload.SchemaModuleDescription, map[string]any{
+			"address": serverAcct.Address(),
+			"name":    "PrimaryArchivist",
+			"queries": []string{client.QuerySchemaArchivistGet, client.QuerySchemaArchivistInsert},
+		})
+		bw, built, _ := boundwitness.NewBuilder().Signer(serverAcct).Payload(desc).Build()
+		// Include an envelope-level warning/error alongside data to test error preservation
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data":   []any{bw, built, []any{}},
+			"errors": []any{payload.NewModuleErrorPayload("Warn", "partial notice", "")},
+		})
+	}))
+	defer srv.Close()
+
+	node, err := client.NewNodeClient(srv.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rem := client.NewRemoteModule(node, serverAcct.Address(), "PrimaryArchivist", []string{
+		client.QuerySchemaArchivistGet,
+		client.QuerySchemaArchivistInsert,
+	})
+
+	ctx := context.Background()
+	desc, err := rem.Describe(ctx)
+	if err != nil || desc.Name != "PrimaryArchivist" || desc.Address != serverAcct.Address() {
+		t.Fatalf("Describe failed: desc=%+v err=%v", desc, err)
+	}
+
+	// Envelope error preserved alongside data
+	res, err := rem.Query(ctx, payload.NewBasePayload(client.QuerySchemaModuleDescribe))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Errors) != 1 || res.Errors[0].Name != "Warn" {
+		t.Fatalf("expected preserved envelope error, got %+v", res.Errors)
+	}
+
+	// StaticModuleResolver & ModuleTypeChecks
+	resolver := client.NewStaticModuleResolver(rem)
+	if resolver.ResolveByAddress("0x"+serverAcct.Address()) == nil {
+		t.Fatal("ResolveByAddress failed")
+	}
+	if resolver.ResolveByName("PrimaryArchivist") == nil {
+		t.Fatal("ResolveByName failed")
+	}
+	if len(resolver.ResolveByQuery(client.QuerySchemaArchivistGet)) != 1 {
+		t.Fatal("ResolveByQuery failed")
+	}
+	if len(resolver.ResolveAll()) != 1 {
+		t.Fatal("ResolveAll failed")
+	}
+	if !client.IsArchivist(rem) || client.IsDiviner(rem) || client.IsWitness(rem) || client.IsSentinel(rem) || client.IsBridge(rem) || client.IsNode(rem) {
+		t.Fatal("ModuleTypeChecks mismatch")
+	}
+	if !payload.IsValidSchema(client.QuerySchemaModuleAddressPreviousHash) {
+		t.Fatalf("QuerySchemaModuleAddressPreviousHash must be valid schema: %q", client.QuerySchemaModuleAddressPreviousHash)
+	}
 }
 
 func TestXyoPanelWithWitnessesAndMemoryArchivist(t *testing.T) {
@@ -197,5 +354,15 @@ func TestXyoPanelWithWitnessesAndMemoryArchivist(t *testing.T) {
 	fetched, err := memArch.Get(ctx, []string{bwHash})
 	if err != nil || len(fetched) != 1 {
 		t.Fatalf("MemoryArchivist.Get(bwHash) failed: len=%d err=%v", len(fetched), err)
+	}
+
+	// Nil witness / nil archivist must be safely ignored without panicking
+	safePanel, err := client.NewPanel(nil, []client.ArchivistInstance{nil, memArch}, nil, basic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := safePanel.Report(ctx)
+	if err != nil || len(rep) != 1 {
+		t.Fatalf("safePanel.Report failed: len=%d err=%v", len(rep), err)
 	}
 }
